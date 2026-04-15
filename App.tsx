@@ -8,6 +8,7 @@ import {
   Pressable,
   RefreshControl,
   SafeAreaView,
+  Share,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -18,9 +19,11 @@ import {
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import * as ImagePicker from "expo-image-picker";
+import NetInfo from "@react-native-community/netinfo";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { fetchBackendVersion } from "./src/lib/backend";
 import {
+  approveMembershipRequest,
   createAuthHeaders,
   createBackendUrl,
   createTask,
@@ -30,13 +33,19 @@ import {
   dismissLog,
   exchangeMobileSession,
   fetchAppState,
+  generateGroupInvite,
+  leaveGroup,
+  removeMember,
   postTaskAction,
+  rejectMembershipRequest,
   replaceReferencePhoto,
   replaceTaskPhoto,
   type CreateTaskPayload,
   type MobileAppState,
   type MobileGroup,
   type MobileLogRecord,
+  type MobileMemberRecord,
+  type MobileMembershipRequestRecord,
   type MobileTaskRecord,
   type RecurrenceFrequency,
   type TaskAction,
@@ -45,6 +54,7 @@ import {
   uploadReferencePhoto,
   uploadTaskPhoto,
   updateTask,
+  updateWorkspaceSettings,
 } from "./src/lib/api";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -88,6 +98,28 @@ type RangeDraft = {
   startDate: string;
   endDate: string;
 };
+
+function requestAgeLabel(value: string) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function syncLabel(value: string | null) {
+  if (!value) {
+    return "未同期";
+  }
+
+  return `最終同期 ${new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value))}`;
+}
 
 function createRedirectUri() {
   return `${APP_SCHEME}://auth/callback`;
@@ -158,6 +190,13 @@ function formatApiError(error: unknown) {
       return "完了写真はタスク完了後に登録できます。";
     case "PHOTO_PERMISSION_DENIED":
       return "写真ライブラリへのアクセスを許可してください。";
+    case "FORBIDDEN":
+      return "この操作を実行する権限がありません。";
+    case "LAST_ADMIN_CANNOT_LEAVE":
+      return "最後の管理者はグループから退出できません。";
+    case "MEMBERSHIP_NOT_FOUND":
+    case "REQUEST_NOT_FOUND":
+      return "対象データが見つかりません。";
     default:
       return "通信に失敗しました。ネットワーク状態を確認してください。";
   }
@@ -363,6 +402,11 @@ export default function App() {
     startDate: buildTodayLabel(),
     endDate: shiftDate(buildTodayLabel(), 30),
   });
+  const [managementModalVisible, setManagementModalVisible] = useState(false);
+  const [managementBusyKey, setManagementBusyKey] = useState<string | null>(null);
+  const [notificationTimeDraft, setNotificationTimeDraft] = useState("08:00");
+  const [isOnline, setIsOnline] = useState(true);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
 
   const loadBackendVersion = useCallback(async () => {
@@ -394,6 +438,7 @@ export default function App() {
       setAppState(response.state);
       setLoadState("ready");
       setErrorMessage(null);
+      setLastSyncedAt(new Date().toISOString());
     } catch (error) {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
       setSessionToken(null);
@@ -410,6 +455,12 @@ export default function App() {
     })();
   }, [loadBackendVersion, loadSession]);
 
+  useEffect(() => {
+    if (appState?.workspace?.notification_time) {
+      setNotificationTimeDraft(appState.workspace.notification_time.slice(0, 5));
+    }
+  }, [appState?.workspace?.notification_time]);
+
   const refreshData = useCallback(async () => {
     if (!sessionToken) {
       return;
@@ -422,6 +473,7 @@ export default function App() {
       setAppState(response.state);
       setErrorMessage(null);
       setLoadState("ready");
+      setLastSyncedAt(new Date().toISOString());
     } catch (error) {
       setErrorMessage(formatApiError(error));
     } finally {
@@ -446,6 +498,21 @@ export default function App() {
       subscription.remove();
     };
   }, [loadBackendVersion, refreshData, sessionToken]);
+
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      const nextOnline = Boolean(state.isConnected && state.isInternetReachable !== false);
+      setIsOnline(nextOnline);
+
+      if (nextOnline && sessionToken) {
+        void refreshData();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [refreshData, sessionToken]);
 
   const handleLogin = useCallback(async () => {
     setLoggingIn(true);
@@ -581,6 +648,10 @@ export default function App() {
       });
   }, [appState, rangeDraft.endDate, rangeDraft.startDate]);
 
+  const isAdmin = appState?.appUser?.role === "admin";
+  const pendingRequests = appState?.pendingRequests ?? [];
+  const members = appState?.members ?? [];
+
   const openCreateModal = useCallback(() => {
     setDraftTask(createDefaultDraft(selectedDate));
     setEditorMode("create");
@@ -595,6 +666,10 @@ export default function App() {
     });
     setListModalVisible(true);
   }, [selectedDate]);
+
+  const openManagementModal = useCallback(() => {
+    setManagementModalVisible(true);
+  }, []);
 
   const openEditModal = useCallback((task: MobileTaskRecord) => {
     setDraftTask(createDraftFromTask(task));
@@ -772,6 +847,148 @@ export default function App() {
     },
     [refreshData, sessionToken],
   );
+
+  const handleGenerateInvite = useCallback(async () => {
+    if (!sessionToken || !primaryGroup?.id) {
+      return;
+    }
+
+    setManagementBusyKey("invite");
+    setErrorMessage(null);
+
+    try {
+      const result = await generateGroupInvite(primaryGroup.id, sessionToken);
+      await Share.share({
+        message: result.inviteUrl,
+        url: result.inviteUrl,
+      });
+      await refreshData();
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setManagementBusyKey(null);
+    }
+  }, [primaryGroup?.id, refreshData, sessionToken]);
+
+  const handleApproveRequest = useCallback(
+    async (requestId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      setManagementBusyKey(`approve:${requestId}`);
+      setErrorMessage(null);
+
+      try {
+        await approveMembershipRequest(requestId, sessionToken);
+        await refreshData();
+      } catch (error) {
+        setErrorMessage(formatApiError(error));
+      } finally {
+        setManagementBusyKey(null);
+      }
+    },
+    [refreshData, sessionToken],
+  );
+
+  const handleRejectRequest = useCallback(
+    async (requestId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      setManagementBusyKey(`reject:${requestId}`);
+      setErrorMessage(null);
+
+      try {
+        await rejectMembershipRequest(requestId, sessionToken);
+        await refreshData();
+      } catch (error) {
+        setErrorMessage(formatApiError(error));
+      } finally {
+        setManagementBusyKey(null);
+      }
+    },
+    [refreshData, sessionToken],
+  );
+
+  const handleRemoveMember = useCallback(
+    (member: MobileMemberRecord) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      Alert.alert("メンバーを削除", `${member.display_name} を削除します。`, [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setManagementBusyKey(`member:${member.id}`);
+              setErrorMessage(null);
+              try {
+                await removeMember(member.id, sessionToken);
+                await refreshData();
+              } catch (error) {
+                setErrorMessage(formatApiError(error));
+              } finally {
+                setManagementBusyKey(null);
+              }
+            })();
+          },
+        },
+      ]);
+    },
+    [refreshData, sessionToken],
+  );
+
+  const handleSaveNotificationTime = useCallback(async () => {
+    if (!sessionToken) {
+      return;
+    }
+
+    setManagementBusyKey("workspace-settings");
+    setErrorMessage(null);
+
+    try {
+      await updateWorkspaceSettings(notificationTimeDraft, sessionToken);
+      await refreshData();
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setManagementBusyKey(null);
+    }
+  }, [notificationTimeDraft, refreshData, sessionToken]);
+
+  const handleLeaveCurrentGroup = useCallback(() => {
+    if (!sessionToken || !primaryGroup?.id) {
+      return;
+    }
+
+    Alert.alert("グループから退出", `${primaryGroup.name} から退出します。`, [
+      { text: "キャンセル", style: "cancel" },
+      {
+        text: "退出",
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            setManagementBusyKey("leave-group");
+            setErrorMessage(null);
+            try {
+              await leaveGroup(primaryGroup.id, sessionToken);
+              setManagementModalVisible(false);
+              await refreshData();
+            } catch (error) {
+              setErrorMessage(formatApiError(error));
+            } finally {
+              setManagementBusyKey(null);
+            }
+          })();
+        },
+      },
+    ]);
+  }, [primaryGroup?.id, primaryGroup?.name, refreshData, sessionToken]);
 
   const pickImageAsset = useCallback(async (): Promise<UploadableImage | null> => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -1058,12 +1275,24 @@ export default function App() {
           </View>
         ) : null}
 
+        <View style={styles.syncCard}>
+          <Text style={styles.syncText}>{isOnline ? "オンライン" : "オフライン"}</Text>
+          <Text style={styles.syncMeta}>{syncLabel(lastSyncedAt)}</Text>
+        </View>
+
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>本日のタスク</Text>
-            <Pressable onPress={() => void handleLogout()}>
-              <Text style={styles.linkText}>ログアウト</Text>
-            </Pressable>
+            <View style={styles.headerActionRow}>
+              <Pressable onPress={openManagementModal}>
+                <Text style={styles.linkText}>
+                  {isAdmin && pendingRequests.length > 0 ? `管理 ${pendingRequests.length}` : "管理"}
+                </Text>
+              </Pressable>
+              <Pressable onPress={() => void handleLogout()}>
+                <Text style={styles.linkText}>ログアウト</Text>
+              </Pressable>
+            </View>
           </View>
 
           {visibleTasks.length === 0 ? (
@@ -1430,6 +1659,130 @@ export default function App() {
             <Pressable style={styles.closeButton} onPress={() => setListModalVisible(false)}>
               <Text style={styles.closeButtonText}>閉じる</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={managementModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setManagementModalVisible(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setManagementModalVisible(false)}>
+          <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalTitle}>グループ詳細</Text>
+              <Text style={styles.modalMeta}>{primaryGroup?.name ?? "グループ未設定"}</Text>
+
+              {isAdmin ? (
+                <>
+                  <View style={styles.formSection}>
+                    <Text style={styles.fieldLabel}>朝通知時刻</Text>
+                    <View style={styles.formRow}>
+                      <View style={styles.formColumn}>
+                        <TextInput
+                          value={notificationTimeDraft}
+                          onChangeText={setNotificationTimeDraft}
+                          placeholder="08:00"
+                          placeholderTextColor="#A59C91"
+                          style={styles.textInput}
+                          autoCapitalize="none"
+                        />
+                      </View>
+                      <View style={styles.formColumn}>
+                        <Pressable
+                          style={styles.primaryButton}
+                          onPress={() => void handleSaveNotificationTime()}
+                        >
+                          <Text style={styles.primaryButtonText}>
+                            {managementBusyKey === "workspace-settings" ? "..." : "保存"}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={styles.formSection}>
+                    <Text style={styles.fieldLabel}>承認待ち申請</Text>
+                    {pendingRequests.length ? (
+                      pendingRequests.map((request: MobileMembershipRequestRecord) => (
+                        <View key={request.id} style={styles.managementCard}>
+                          <View style={styles.managementBody}>
+                            <Text style={styles.managementTitle}>{request.requested_name}</Text>
+                            <Text style={styles.managementMetaText}>
+                              {requestAgeLabel(request.created_at)}
+                            </Text>
+                          </View>
+                          <View style={styles.managementActionRow}>
+                            <Pressable
+                              style={styles.compactActionButton}
+                              onPress={() => void handleApproveRequest(request.id)}
+                            >
+                              <Text style={styles.compactActionText}>
+                                {managementBusyKey === `approve:${request.id}` ? "..." : "承認"}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[styles.compactActionButton, styles.compactDangerButton]}
+                              onPress={() => void handleRejectRequest(request.id)}
+                            >
+                              <Text style={styles.compactDangerText}>
+                                {managementBusyKey === `reject:${request.id}` ? "..." : "却下"}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ))
+                    ) : (
+                      <Text style={styles.emptyText}>承認待ちはありません。</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.formSection}>
+                    <View style={styles.photoSectionHeader}>
+                      <Text style={styles.fieldLabel}>メンバー</Text>
+                      <Pressable style={styles.smallOutlineButton} onPress={() => void handleGenerateInvite()}>
+                        <Text style={styles.smallOutlineButtonText}>
+                          {managementBusyKey === "invite" ? "..." : "招待リンク"}
+                        </Text>
+                      </Pressable>
+                    </View>
+                    {members.map((member: MobileMemberRecord) => (
+                      <View key={member.id} style={styles.managementCard}>
+                        <View style={styles.managementBody}>
+                          <Text style={styles.managementTitle}>{member.display_name}</Text>
+                          <Text style={styles.managementMetaText}>{member.role}</Text>
+                        </View>
+                        {appState?.appUser?.id !== member.id ? (
+                          <Pressable
+                            style={[styles.compactActionButton, styles.compactDangerButton]}
+                            onPress={() => handleRemoveMember(member)}
+                          >
+                            <Text style={styles.compactDangerText}>
+                              {managementBusyKey === `member:${member.id}` ? "..." : "削除"}
+                            </Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ))}
+                  </View>
+                </>
+              ) : (
+                <View style={styles.formSection}>
+                  <Text style={styles.fieldLabel}>危険操作</Text>
+                  <Pressable style={[styles.closeButton, styles.deleteButton]} onPress={handleLeaveCurrentGroup}>
+                    <Text style={styles.deleteButtonText}>
+                      {managementBusyKey === "leave-group" ? "..." : "このグループから退出"}
+                    </Text>
+                  </Pressable>
+                </View>
+              )}
+
+              <Pressable style={styles.closeButton} onPress={() => setManagementModalVisible(false)}>
+                <Text style={styles.closeButtonText}>閉じる</Text>
+              </Pressable>
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1928,6 +2281,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  syncCard: {
+    borderRadius: 18,
+    backgroundColor: "#EEE9DE",
+    padding: 14,
+    gap: 4,
+  },
+  syncText: {
+    color: TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  syncMeta: {
+    color: MUTED,
+    fontSize: 12,
+  },
   sectionCard: {
     borderRadius: 28,
     backgroundColor: CARD,
@@ -1940,6 +2308,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+  },
+  headerActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
   },
   sectionTitle: {
     color: TEXT,
@@ -1984,6 +2357,53 @@ const styles = StyleSheet.create({
   taskSubMeta: {
     color: MUTED,
     fontSize: 12,
+  },
+  managementCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    borderRadius: 18,
+    backgroundColor: "#F5F2EA",
+    padding: 14,
+  },
+  managementBody: {
+    flex: 1,
+    gap: 4,
+  },
+  managementTitle: {
+    color: TEXT,
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  managementMetaText: {
+    color: MUTED,
+    fontSize: 12,
+  },
+  managementActionRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  compactActionButton: {
+    minHeight: 36,
+    borderRadius: 12,
+    backgroundColor: BRAND,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  compactActionText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  compactDangerButton: {
+    backgroundColor: "#FFF0EE",
+  },
+  compactDangerText: {
+    color: "#B13E31",
+    fontSize: 12,
+    fontWeight: "700",
   },
   taskBadgeWrap: {
     alignItems: "flex-end",

@@ -73,6 +73,31 @@ export type MobileLogRecord = {
   } | null;
 };
 
+export type MobileMemberRecord = {
+  id: string;
+  display_name: string;
+  line_picture_url?: string | null;
+  role: "admin" | "member";
+  is_active: boolean;
+};
+
+export type MobileMembershipRequestRecord = {
+  id: string;
+  group_id: string;
+  requested_name: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+  line_user_id: string;
+};
+
+export type MobileInviteRecord = {
+  id: string;
+  group_id: string;
+  invite_token: string;
+  expires_at: string;
+  is_active: boolean;
+};
+
 export type MobileAppState = {
   sessionLineUserId: string | null;
   appUser: MobileAppUser | null;
@@ -80,6 +105,9 @@ export type MobileAppState = {
   groups: MobileGroup[];
   tasks: MobileTaskRecord[];
   logs: MobileLogRecord[];
+  members: MobileMemberRecord[];
+  pendingRequests: MobileMembershipRequestRecord[];
+  activeInvite: MobileInviteRecord | null;
   needsBootstrap: boolean;
   authConfigured: boolean;
 };
@@ -379,4 +407,78 @@ export async function deleteTaskPhoto(
   });
 
   return readJson<{ ok: boolean }>(response);
+}
+
+export async function generateGroupInvite(groupId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/groups/${groupId}/invites`), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean; inviteUrl: string; expiresAt: string }>(response);
+}
+
+export async function approveMembershipRequest(requestId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/membership-requests/${requestId}/approve`), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function rejectMembershipRequest(requestId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/membership-requests/${requestId}/reject`), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function removeMember(userId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/members/${userId}`), {
+    method: "DELETE",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function updateWorkspaceSettings(notificationTime: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl("/api/workspace/settings"), {
+    method: "PATCH",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify({ notificationTime }),
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function leaveGroup(groupId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/groups/${groupId}/leave`), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean; leftWorkspace?: boolean }>(response);
 }
