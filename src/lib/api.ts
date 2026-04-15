@@ -244,6 +244,16 @@ export async function fetchAppState(sessionToken: string) {
   return readJson<AppStateResponse>(response);
 }
 
+export async function fetchPublicAppState() {
+  const response = await fetch(createBackendUrl("/api/app-state"), {
+    headers: {
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<AppStateResponse>(response);
+}
+
 export async function bootstrapWorkspace(
   payload: {
     workspaceName: string;
@@ -464,6 +474,26 @@ export async function generateGroupInvite(groupId: string, sessionToken: string)
   });
 
   return readJson<{ ok: boolean; inviteUrl: string; expiresAt: string }>(response);
+}
+
+export async function createGroup(
+  payload: {
+    name: string;
+    description?: string | null;
+  },
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl("/api/groups"), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return readJson<{ ok: boolean; group: MobileGroup }>(response);
 }
 
 export async function approveMembershipRequest(requestId: string, sessionToken: string) {

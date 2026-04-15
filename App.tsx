@@ -30,6 +30,7 @@ import { fetchBackendVersion } from "./src/lib/backend";
 import {
   approveMembershipRequest,
   bootstrapWorkspace,
+  createGroup,
   createAuthHeaders,
   createBackendUrl,
   createTask,
@@ -39,6 +40,7 @@ import {
   dismissLog,
   exchangeMobileSession,
   fetchAppState,
+  fetchPublicAppState,
   generateGroupInvite,
   leaveGroup,
   removeMember,
@@ -125,6 +127,10 @@ type BootstrapDraft = {
   workspaceName: string;
   groupName: string;
   displayName: string;
+};
+type GroupDraft = {
+  name: string;
+  description: string;
 };
 
 function requestAgeLabel(value: string) {
@@ -228,6 +234,8 @@ function formatApiError(error: unknown) {
       return "写真ライブラリへのアクセスを許可してください。";
     case "CAMERA_PERMISSION_DENIED":
       return "カメラへのアクセスを許可してください。";
+    case "NOTIFICATION_PERMISSION_DENIED":
+      return "通知を許可してください。";
     case "FORBIDDEN":
       return "この操作を実行する権限がありません。";
     case "LAST_ADMIN_CANNOT_LEAVE":
@@ -429,6 +437,19 @@ function TaskPreviewImage({
   );
 }
 
+function localAppMetadata() {
+  const version = Constants.expoConfig?.version ?? "0.0.0";
+  const commitSha =
+    typeof Constants.expoConfig?.extra?.appCommitSha === "string"
+      ? Constants.expoConfig.extra.appCommitSha
+      : "devbuild";
+
+  return {
+    appVersion: `v${version}`,
+    commitSha,
+  };
+}
+
 function SwipeDismissLogItem({
   log,
   busy,
@@ -550,6 +571,9 @@ export default function App() {
     groupName: "",
     displayName: "",
   });
+  const [groupDraft, setGroupDraft] = useState<GroupDraft>({ name: "", description: "" });
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [schedulingTestNotification, setSchedulingTestNotification] = useState(false);
   const [notificationTimeDraft, setNotificationTimeDraft] = useState("08:00");
   const [isOnline, setIsOnline] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -558,6 +582,7 @@ export default function App() {
   >("undetermined");
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
+  const localVersion = useMemo(localAppMetadata, []);
 
   const loadBackendVersion = useCallback(async () => {
     try {
@@ -571,12 +596,21 @@ export default function App() {
     }
   }, []);
 
+  const loadPublicState = useCallback(async () => {
+    try {
+      const response = await fetchPublicAppState();
+      setAppState(response.state);
+    } catch {
+      setAppState(null);
+    }
+  }, []);
+
   const loadSession = useCallback(async () => {
     const storedToken = await SecureStore.getItemAsync(SESSION_TOKEN_KEY);
 
     if (!storedToken) {
       setSessionToken(null);
-      setAppState(null);
+      await loadPublicState();
       setLoadState("logged_out");
       return;
     }
@@ -592,11 +626,11 @@ export default function App() {
     } catch (error) {
       await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
       setSessionToken(null);
-      setAppState(null);
+      await loadPublicState();
       setLoadState("logged_out");
       setErrorMessage(formatApiError(error));
     }
-  }, []);
+  }, [loadPublicState]);
 
   useEffect(() => {
     void (async () => {
@@ -1402,6 +1436,74 @@ export default function App() {
     }
   }, [bootstrapDraft.displayName, bootstrapDraft.groupName, bootstrapDraft.workspaceName, refreshData, sessionToken]);
 
+  const handleCreateGroup = useCallback(async () => {
+    if (!sessionToken) {
+      return;
+    }
+
+    if (!groupDraft.name.trim()) {
+      setErrorMessage("グループ名を入力してください。");
+      return;
+    }
+
+    setCreatingGroup(true);
+    setErrorMessage(null);
+    try {
+      const result = await createGroup(
+        {
+          name: groupDraft.name.trim(),
+          description: groupDraft.description.trim() || null,
+        },
+        sessionToken,
+      );
+      setGroupDraft({ name: "", description: "" });
+      await refreshData();
+      setSelectedGroupScope(result.group.id);
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setCreatingGroup(false);
+    }
+  }, [groupDraft.description, groupDraft.name, refreshData, sessionToken]);
+
+  const handleScheduleTestNotification = useCallback(async () => {
+    setSchedulingTestNotification(true);
+    setErrorMessage(null);
+    try {
+      const settings = await Notifications.getPermissionsAsync();
+      let status = settings.status;
+
+      if (status !== "granted") {
+        const requestResult = await Notifications.requestPermissionsAsync();
+        status = requestResult.status;
+      }
+
+      setNotificationPermission(status);
+
+      if (status !== "granted") {
+        throw new Error("NOTIFICATION_PERMISSION_DENIED");
+      }
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "テスト通知",
+          body: `${selectedGroup?.name ?? "個人タスク"} の通知テストです。10秒後に表示されます。`,
+          sound: "default",
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: new Date(Date.now() + 10_000),
+        },
+      });
+
+      Alert.alert("テスト通知を予約しました", "10秒後にローカル通知を送ります。");
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setSchedulingTestNotification(false);
+    }
+  }, [selectedGroup?.name]);
+
   const handleReferencePhotoUpload = useCallback(
     async (taskId: string, photoId?: string) => {
       if (!sessionToken) {
@@ -1546,34 +1648,47 @@ export default function App() {
         <ExpoStatusBar style="dark" />
         <View style={styles.loginScreen}>
           <Text style={styles.eyebrow}>TEAM TASK NATIVE</Text>
-          <Text style={styles.loginTitle}>LINEでログイン</Text>
+          <Text style={styles.loginTitle}>
+            {appState?.authConfigured === false ? "サーバー設定未完了" : "LINEでログイン"}
+          </Text>
           <Text style={styles.loginDescription}>
-            ブラウザ表示ではなく、Expo ネイティブ画面から直接タスクを扱う構成です。
+            {appState?.authConfigured === false
+              ? "LINE 認証または Supabase の設定が不足しています。Web バックエンドの環境変数を確認してください。"
+              : appState?.needsBootstrap
+                ? "ログイン後に最初のワークスペースを作成します。"
+                : "ブラウザ表示ではなく、Expo ネイティブ画面から直接タスクを扱う構成です。"}
           </Text>
 
-          <Pressable
-            style={[styles.primaryButton, loggingIn && styles.primaryButtonDisabled]}
-            onPress={() => void handleLogin()}
-            disabled={loggingIn}
-          >
-            {loggingIn ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.primaryButtonText}>LINEログインを開始</Text>
-            )}
-          </Pressable>
+          {appState?.authConfigured === false ? null : (
+            <>
+              <Pressable
+                style={[styles.primaryButton, loggingIn && styles.primaryButtonDisabled]}
+                onPress={() => void handleLogin()}
+                disabled={loggingIn}
+              >
+                {loggingIn ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>LINEログインを開始</Text>
+                )}
+              </Pressable>
 
-          <Pressable
-            style={styles.secondaryModalButton}
-            onPress={() => setJoinModalVisible(true)}
-          >
-            <Text style={styles.secondaryModalButtonText}>招待リンクで参加</Text>
-          </Pressable>
+              <Pressable
+                style={styles.secondaryModalButton}
+                onPress={() => setJoinModalVisible(true)}
+              >
+                <Text style={styles.secondaryModalButtonText}>招待リンクで参加</Text>
+              </Pressable>
+            </>
+          )}
 
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
 
           <View style={styles.versionCard}>
-            <Text style={styles.versionLabel}>接続先</Text>
+            <Text style={styles.versionLabel}>アプリ版</Text>
+            <Text style={styles.versionValue}>{localVersion.appVersion}</Text>
+            <Text style={styles.versionCommit}>{localVersion.commitSha}</Text>
+            <Text style={[styles.versionLabel, styles.versionSpacer]}>接続先</Text>
             <Text style={styles.versionValue}>{backendVersion?.appVersion ?? "-"}</Text>
             <Text style={styles.versionCommit}>{backendVersion?.commitSha ?? "-"}</Text>
           </View>
@@ -1851,7 +1966,7 @@ export default function App() {
 
         <View style={styles.versionFooter}>
           <Text style={styles.versionFooterText}>
-            {backendVersion?.appVersion ?? "-"} ({backendVersion?.commitSha ?? "-"})
+            App {localVersion.appVersion} ({localVersion.commitSha}) / Backend {backendVersion?.appVersion ?? "-"} ({backendVersion?.commitSha ?? "-"})
           </Text>
         </View>
       </ScrollView>
@@ -2205,6 +2320,49 @@ export default function App() {
                         </Pressable>
                       </View>
                     </View>
+                    <Pressable
+                      style={[
+                        styles.secondaryModalButton,
+                        schedulingTestNotification && styles.primaryButtonDisabled,
+                      ]}
+                      onPress={() => void handleScheduleTestNotification()}
+                      disabled={schedulingTestNotification}
+                    >
+                      <Text style={styles.secondaryModalButtonText}>
+                        {schedulingTestNotification ? "予約中..." : "10秒後に通知テスト"}
+                      </Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.formSection}>
+                    <Text style={styles.fieldLabel}>グループ作成</Text>
+                    <TextInput
+                      value={groupDraft.name}
+                      onChangeText={(name) => setGroupDraft((current) => ({ ...current, name }))}
+                      placeholder="新しいグループ名"
+                      placeholderTextColor="#A59C91"
+                      style={styles.textInput}
+                    />
+                    <TextInput
+                      value={groupDraft.description}
+                      onChangeText={(description) =>
+                        setGroupDraft((current) => ({ ...current, description }))
+                      }
+                      placeholder="説明（任意）"
+                      placeholderTextColor="#A59C91"
+                      style={styles.textInput}
+                    />
+                    <Pressable
+                      style={[styles.primaryButton, creatingGroup && styles.primaryButtonDisabled]}
+                      onPress={() => void handleCreateGroup()}
+                      disabled={creatingGroup}
+                    >
+                      {creatingGroup ? (
+                        <ActivityIndicator color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.primaryButtonText}>グループを作成</Text>
+                      )}
+                    </Pressable>
                   </View>
 
                   <View style={styles.formSection}>
@@ -2725,6 +2883,9 @@ const styles = StyleSheet.create({
     color: MUTED,
     fontSize: 12,
     fontWeight: "700",
+  },
+  versionSpacer: {
+    marginTop: 10,
   },
   versionValue: {
     color: TEXT,
