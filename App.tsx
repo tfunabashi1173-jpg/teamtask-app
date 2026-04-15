@@ -97,6 +97,8 @@ const WEEKDAYS = [
   { label: "金", value: 5 },
   { label: "土", value: 6 },
 ];
+const HOURS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
+const MINUTES = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, "0"));
 
 type LoadState = "booting" | "logged_out" | "ready";
 type DraftTask = {
@@ -335,6 +337,18 @@ function buildMorningNotificationSummary(tasks: MobileTaskRecord[], dateLabel: s
   return {
     title: `${formatTaskDateLabel(dateLabel)}のタスク ${targetTasks.length}件`,
     body: restCount > 0 ? `${preview} / ほか${restCount}件` : preview,
+  };
+}
+
+function splitNotificationTime(value: string) {
+  const parsed = parseNotificationTime(value);
+  if (!parsed) {
+    return { hour: "08", minute: "00" };
+  }
+
+  return {
+    hour: String(parsed.hour).padStart(2, "0"),
+    minute: String(parsed.minute).padStart(2, "0"),
   };
 }
 
@@ -660,6 +674,10 @@ export default function App() {
   const dateTitleSlide = useRef(new Animated.Value(0)).current;
   const [animatedDateLabel, setAnimatedDateLabel] = useState(buildTodayLabel());
   const localVersion = useMemo(localAppMetadata, []);
+  const notificationTimeParts = useMemo(
+    () => splitNotificationTime(notificationTimeDraft),
+    [notificationTimeDraft],
+  );
 
   const clearMorningLocalNotifications = useCallback(async () => {
     const requests = await Notifications.getAllScheduledNotificationsAsync();
@@ -1468,6 +1486,16 @@ export default function App() {
       setManagementBusyKey(null);
     }
   }, [notificationTimeDraft, refreshData, sessionToken]);
+
+  const updateNotificationTimePart = useCallback(
+    (part: "hour" | "minute", value: string) => {
+      const current = splitNotificationTime(notificationTimeDraft);
+      const nextHour = part === "hour" ? value : current.hour;
+      const nextMinute = part === "minute" ? value : current.minute;
+      setNotificationTimeDraft(`${nextHour}:${nextMinute}`);
+    },
+    [notificationTimeDraft],
+  );
 
   const handleLeaveCurrentGroup = useCallback(() => {
     if (!sessionToken || !selectedGroup?.id) {
@@ -2521,17 +2549,67 @@ export default function App() {
                 <>
                   <View style={styles.formSection}>
                     <Text style={styles.fieldLabel}>朝通知時刻</Text>
+                    <Text style={styles.modalMeta}>
+                      {notificationTimeDraft}
+                    </Text>
+                    <View style={styles.timeSelectorBlock}>
+                      <Text style={styles.timeSelectorLabel}>時</Text>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.optionRow}
+                      >
+                        {HOURS.map((hour) => (
+                          <Pressable
+                            key={hour}
+                            style={[
+                              styles.choiceChip,
+                              notificationTimeParts.hour === hour && styles.choiceChipActive,
+                            ]}
+                            onPress={() => updateNotificationTimePart("hour", hour)}
+                          >
+                            <Text
+                              style={[
+                                styles.choiceChipText,
+                                notificationTimeParts.hour === hour && styles.choiceChipTextActive,
+                              ]}
+                            >
+                              {hour}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </ScrollView>
+                    </View>
+                    <View style={styles.timeSelectorBlock}>
+                      <Text style={styles.timeSelectorLabel}>分</Text>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.optionRow}
+                      >
+                        {MINUTES.map((minute) => (
+                          <Pressable
+                            key={minute}
+                            style={[
+                              styles.choiceChip,
+                              notificationTimeParts.minute === minute && styles.choiceChipActive,
+                            ]}
+                            onPress={() => updateNotificationTimePart("minute", minute)}
+                          >
+                            <Text
+                              style={[
+                                styles.choiceChipText,
+                                notificationTimeParts.minute === minute &&
+                                  styles.choiceChipTextActive,
+                              ]}
+                            >
+                              {minute}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </ScrollView>
+                    </View>
                     <View style={styles.formRow}>
-                      <View style={styles.formColumn}>
-                        <TextInput
-                          value={notificationTimeDraft}
-                          onChangeText={setNotificationTimeDraft}
-                          placeholder="08:00"
-                          placeholderTextColor="#A59C91"
-                          style={styles.textInput}
-                          autoCapitalize="none"
-                        />
-                      </View>
                       <View style={styles.formColumn}>
                         <Pressable
                           style={styles.primaryButton}
@@ -3623,6 +3701,14 @@ const styles = StyleSheet.create({
   formColumn: {
     flex: 1,
     gap: 8,
+  },
+  timeSelectorBlock: {
+    gap: 8,
+  },
+  timeSelectorLabel: {
+    color: MUTED,
+    fontSize: 12,
+    fontWeight: "700",
   },
   fieldLabel: {
     color: TEXT,
