@@ -2407,20 +2407,6 @@ export default function App() {
                 </View>
 
                 <View style={styles.actionGrid}>
-                  <Pressable
-                    style={[styles.actionButton, styles.actionButtonSecondary]}
-                    onPress={() => openEditModal(selectedTask)}
-                    disabled={actingTaskId === selectedTask.id}
-                  >
-                    {actingTaskId === selectedTask.id ? (
-                      <View style={styles.actionButtonBusyRow}>
-                        <ActivityIndicator size="small" color="#FFFFFF" />
-                        <Text style={styles.actionButtonText}>処理中</Text>
-                      </View>
-                    ) : (
-                      <Text style={styles.actionButtonText}>編集</Text>
-                    )}
-                  </Pressable>
                   {(["start", "confirm", "complete", "pause", "postpone"] as TaskAction[]).map(
                     (action) => (
                       <Pressable
