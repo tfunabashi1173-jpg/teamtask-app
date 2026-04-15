@@ -136,6 +136,12 @@ export type UpdateTaskPayload = {
   };
 };
 
+export type UploadableImage = {
+  uri: string;
+  name: string;
+  mimeType: string;
+};
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -168,6 +174,31 @@ async function readJson<T>(response: Response) {
   }
 
   return (await response.json()) as T;
+}
+
+async function sendImageFormRequest<T>(
+  path: string,
+  method: "POST" | "PATCH",
+  image: UploadableImage,
+  sessionToken: string,
+) {
+  const formData = new FormData();
+  formData.append("file", {
+    uri: image.uri,
+    name: image.name,
+    type: image.mimeType,
+  } as never);
+
+  const response = await fetch(createBackendUrl(path), {
+    method,
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+    body: formData,
+  });
+
+  return readJson<T>(response);
 }
 
 export async function fetchAppState(sessionToken: string) {
@@ -255,6 +286,92 @@ export async function deleteTask(taskId: string, sessionToken: string) {
 export async function dismissLog(logId: string, sessionToken: string) {
   const response = await fetch(createBackendUrl(`/api/logs/${logId}/dismiss`), {
     method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function uploadReferencePhoto(
+  taskId: string,
+  image: UploadableImage,
+  sessionToken: string,
+) {
+  return sendImageFormRequest<{ ok: boolean }>(
+    `/api/tasks/${taskId}/reference-photos`,
+    "POST",
+    image,
+    sessionToken,
+  );
+}
+
+export async function replaceReferencePhoto(
+  taskId: string,
+  photoId: string,
+  image: UploadableImage,
+  sessionToken: string,
+) {
+  return sendImageFormRequest<{ ok: boolean }>(
+    `/api/tasks/${taskId}/reference-photos/${photoId}`,
+    "PATCH",
+    image,
+    sessionToken,
+  );
+}
+
+export async function deleteReferencePhoto(
+  taskId: string,
+  photoId: string,
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl(`/api/tasks/${taskId}/reference-photos/${photoId}`), {
+    method: "DELETE",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function uploadTaskPhoto(
+  taskId: string,
+  image: UploadableImage,
+  sessionToken: string,
+) {
+  return sendImageFormRequest<{ ok: boolean }>(
+    `/api/tasks/${taskId}/photos`,
+    "POST",
+    image,
+    sessionToken,
+  );
+}
+
+export async function replaceTaskPhoto(
+  taskId: string,
+  photoId: string,
+  image: UploadableImage,
+  sessionToken: string,
+) {
+  return sendImageFormRequest<{ ok: boolean }>(
+    `/api/tasks/${taskId}/photos/${photoId}`,
+    "PATCH",
+    image,
+    sessionToken,
+  );
+}
+
+export async function deleteTaskPhoto(
+  taskId: string,
+  photoId: string,
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl(`/api/tasks/${taskId}/photos/${photoId}`), {
+    method: "DELETE",
     headers: {
       ...createAuthHeaders(sessionToken),
       "Cache-Control": "no-store",

@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
+import * as ImagePicker from "expo-image-picker";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { fetchBackendVersion } from "./src/lib/backend";
 import {
@@ -24,10 +25,14 @@ import {
   createBackendUrl,
   createTask,
   deleteTask,
+  deleteReferencePhoto,
+  deleteTaskPhoto,
   dismissLog,
   exchangeMobileSession,
   fetchAppState,
   postTaskAction,
+  replaceReferencePhoto,
+  replaceTaskPhoto,
   type CreateTaskPayload,
   type MobileAppState,
   type MobileGroup,
@@ -36,6 +41,9 @@ import {
   type RecurrenceFrequency,
   type TaskAction,
   type TaskPhotoRecord,
+  type UploadableImage,
+  uploadReferencePhoto,
+  uploadTaskPhoto,
   updateTask,
 } from "./src/lib/api";
 
@@ -138,6 +146,14 @@ function formatApiError(error: unknown) {
       return "繰り返し設定が不足しています。";
     case "INVALID_RECURRENCE_PERIOD":
       return "繰り返しの終了日は開始日以降にしてください。";
+    case "INVALID_FILE":
+      return "画像ファイルを選択してください。";
+    case "PHOTO_LIMIT_REACHED":
+      return "写真の上限枚数に達しています。";
+    case "TASK_NOT_COMPLETED":
+      return "完了写真はタスク完了後に登録できます。";
+    case "PHOTO_PERMISSION_DENIED":
+      return "写真ライブラリへのアクセスを許可してください。";
     default:
       return "通信に失敗しました。ネットワーク状態を確認してください。";
   }
@@ -271,24 +287,28 @@ function priorityLabel(priority: MobileTaskRecord["priority"]) {
 function TaskPreviewImage({
   photo,
   sessionToken,
+  onPress,
 }: {
   photo: TaskPhotoRecord;
   sessionToken: string;
+  onPress?: () => void;
 }) {
   if (!photo.preview_url) {
     return null;
   }
 
   return (
-    // eslint-disable-next-line jsx-a11y/alt-text
-    <Image
-      source={{
-        uri: createBackendUrl(photo.preview_url),
-        headers: createAuthHeaders(sessionToken),
-      }}
-      style={styles.previewImage}
-      resizeMode="cover"
-    />
+    <Pressable onPress={onPress}>
+      {/* eslint-disable-next-line jsx-a11y/alt-text */}
+      <Image
+        source={{
+          uri: createBackendUrl(photo.preview_url),
+          headers: createAuthHeaders(sessionToken),
+        }}
+        style={styles.previewImage}
+        resizeMode="cover"
+      />
+    </Pressable>
   );
 }
 
@@ -310,6 +330,8 @@ export default function App() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
+  const [photoViewer, setPhotoViewer] = useState<{ uri: string; label: string } | null>(null);
+  const [uploadingPhotoKey, setUploadingPhotoKey] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
 
   const loadBackendVersion = useCallback(async () => {
@@ -693,6 +715,158 @@ export default function App() {
     [refreshData, sessionToken],
   );
 
+  const pickImageAsset = useCallback(async (): Promise<UploadableImage | null> => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      throw new Error("PHOTO_PERMISSION_DENIED");
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      quality: 0.85,
+    });
+
+    if (result.canceled) {
+      return null;
+    }
+
+    const asset = result.assets[0];
+    if (!asset?.uri) {
+      return null;
+    }
+
+    return {
+      uri: asset.uri,
+      name: asset.fileName ?? `photo-${Date.now()}.jpg`,
+      mimeType: asset.mimeType ?? "image/jpeg",
+    };
+  }, []);
+
+  const handleReferencePhotoUpload = useCallback(
+    async (taskId: string, photoId?: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      try {
+        const asset = await pickImageAsset();
+        if (!asset) {
+          return;
+        }
+
+        const key = `reference:${taskId}:${photoId ?? "new"}`;
+        setUploadingPhotoKey(key);
+        setErrorMessage(null);
+
+        if (photoId) {
+          await replaceReferencePhoto(taskId, photoId, asset, sessionToken);
+        } else {
+          await uploadReferencePhoto(taskId, asset, sessionToken);
+        }
+
+        await refreshData();
+      } catch (error) {
+        setErrorMessage(formatApiError(error));
+      } finally {
+        setUploadingPhotoKey(null);
+      }
+    },
+    [pickImageAsset, refreshData, sessionToken],
+  );
+
+  const handleTaskPhotoUpload = useCallback(
+    async (taskId: string, photoId?: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      try {
+        const asset = await pickImageAsset();
+        if (!asset) {
+          return;
+        }
+
+        const key = `done:${taskId}:${photoId ?? "new"}`;
+        setUploadingPhotoKey(key);
+        setErrorMessage(null);
+
+        if (photoId) {
+          await replaceTaskPhoto(taskId, photoId, asset, sessionToken);
+        } else {
+          await uploadTaskPhoto(taskId, asset, sessionToken);
+        }
+
+        await refreshData();
+      } catch (error) {
+        setErrorMessage(formatApiError(error));
+      } finally {
+        setUploadingPhotoKey(null);
+      }
+    },
+    [pickImageAsset, refreshData, sessionToken],
+  );
+
+  const handleReferencePhotoDelete = useCallback(
+    (taskId: string, photoId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      Alert.alert("説明画像を削除", "この画像を削除します。", [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              try {
+                setUploadingPhotoKey(`reference:${taskId}:${photoId}`);
+                await deleteReferencePhoto(taskId, photoId, sessionToken);
+                await refreshData();
+              } catch (error) {
+                setErrorMessage(formatApiError(error));
+              } finally {
+                setUploadingPhotoKey(null);
+              }
+            })();
+          },
+        },
+      ]);
+    },
+    [refreshData, sessionToken],
+  );
+
+  const handleTaskPhotoDelete = useCallback(
+    (taskId: string, photoId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      Alert.alert("完了写真を削除", "この画像を削除します。", [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              try {
+                setUploadingPhotoKey(`done:${taskId}:${photoId}`);
+                await deleteTaskPhoto(taskId, photoId, sessionToken);
+                await refreshData();
+              } catch (error) {
+                setErrorMessage(formatApiError(error));
+              } finally {
+                setUploadingPhotoKey(null);
+              }
+            })();
+          },
+        },
+      ]);
+    },
+    [refreshData, sessionToken],
+  );
+
   if (loadState === "booting") {
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -942,14 +1116,116 @@ export default function App() {
                 {selectedTask.reference_photos?.length ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewStrip}>
                     {selectedTask.reference_photos.map((photo) => (
-                      <TaskPreviewImage
-                        key={photo.id}
-                        photo={photo}
-                        sessionToken={sessionToken ?? ""}
-                      />
+                      <View key={photo.id} style={styles.photoCard}>
+                        <TaskPreviewImage
+                          photo={photo}
+                          sessionToken={sessionToken ?? ""}
+                          onPress={() =>
+                            setPhotoViewer({
+                              uri: createBackendUrl(photo.preview_url ?? ""),
+                              label: photo.file_name,
+                            })
+                          }
+                        />
+                        <View style={styles.photoActionRow}>
+                          <Pressable
+                            style={styles.photoActionButton}
+                            onPress={() => void handleReferencePhotoUpload(selectedTask.id, photo.id)}
+                          >
+                            <Text style={styles.photoActionText}>
+                              {uploadingPhotoKey === `reference:${selectedTask.id}:${photo.id}`
+                                ? "..."
+                                : "更新"}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={styles.photoActionButton}
+                            onPress={() => handleReferencePhotoDelete(selectedTask.id, photo.id)}
+                          >
+                            <Text style={styles.photoActionText}>削除</Text>
+                          </Pressable>
+                        </View>
+                      </View>
                     ))}
                   </ScrollView>
                 ) : null}
+
+                <View style={styles.photoSection}>
+                  <View style={styles.photoSectionHeader}>
+                    <Text style={styles.fieldLabel}>説明用画像</Text>
+                    {(selectedTask.reference_photos?.length ?? 0) < 2 ? (
+                      <Pressable
+                        style={styles.smallOutlineButton}
+                        onPress={() => void handleReferencePhotoUpload(selectedTask.id)}
+                      >
+                        <Text style={styles.smallOutlineButtonText}>
+                          {uploadingPhotoKey === `reference:${selectedTask.id}:new` ? "..." : "追加"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {!selectedTask.reference_photos?.length ? (
+                    <Text style={styles.emptyText}>説明用画像はまだありません。</Text>
+                  ) : null}
+                </View>
+
+                <View style={styles.photoSection}>
+                  <View style={styles.photoSectionHeader}>
+                    <Text style={styles.fieldLabel}>完了写真</Text>
+                    {selectedTask.status === "done" && (selectedTask.photos?.length ?? 0) < 3 ? (
+                      <Pressable
+                        style={styles.smallOutlineButton}
+                        onPress={() => void handleTaskPhotoUpload(selectedTask.id)}
+                      >
+                        <Text style={styles.smallOutlineButtonText}>
+                          {uploadingPhotoKey === `done:${selectedTask.id}:new` ? "..." : "追加"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {selectedTask.photos?.length ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewStrip}>
+                      {selectedTask.photos.map((photo) => (
+                        <View key={photo.id} style={styles.photoCard}>
+                          <TaskPreviewImage
+                            photo={photo}
+                            sessionToken={sessionToken ?? ""}
+                            onPress={() =>
+                              setPhotoViewer({
+                                uri: createBackendUrl(photo.preview_url ?? ""),
+                                label: photo.file_name,
+                              })
+                            }
+                          />
+                          <View style={styles.photoActionRow}>
+                            <Pressable
+                              style={styles.photoActionButton}
+                              onPress={() => void handleTaskPhotoUpload(selectedTask.id, photo.id)}
+                            >
+                              <Text style={styles.photoActionText}>
+                                {uploadingPhotoKey === `done:${selectedTask.id}:${photo.id}`
+                                  ? "..."
+                                  : "更新"}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={styles.photoActionButton}
+                              onPress={() => handleTaskPhotoDelete(selectedTask.id, photo.id)}
+                            >
+                              <Text style={styles.photoActionText}>削除</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <Text style={styles.emptyText}>
+                      {selectedTask.status === "done"
+                        ? "完了写真はまだありません。"
+                        : "完了写真はタスク完了後に登録できます。"}
+                    </Text>
+                  )}
+                </View>
 
                 <View style={styles.actionGrid}>
                   <Pressable
@@ -989,6 +1265,30 @@ export default function App() {
               </>
             ) : null}
           </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={Boolean(photoViewer)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPhotoViewer(null)}
+      >
+        <Pressable style={styles.photoViewerBackdrop} onPress={() => setPhotoViewer(null)}>
+          <View style={styles.photoViewerCard}>
+            <Text style={styles.photoViewerLabel}>{photoViewer?.label ?? ""}</Text>
+            {photoViewer ? (
+              // eslint-disable-next-line jsx-a11y/alt-text
+              <Image
+                source={{
+                  uri: photoViewer.uri,
+                  headers: createAuthHeaders(sessionToken ?? ""),
+                }}
+                style={styles.photoViewerImage}
+                resizeMode="contain"
+              />
+            ) : null}
+          </View>
         </Pressable>
       </Modal>
 
@@ -1783,12 +2083,57 @@ const styles = StyleSheet.create({
   previewStrip: {
     marginTop: 4,
   },
+  photoSection: {
+    gap: 8,
+    marginTop: 6,
+  },
+  photoSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  photoCard: {
+    marginRight: 10,
+    gap: 6,
+  },
   previewImage: {
     width: 104,
     height: 104,
     borderRadius: 18,
     marginRight: 10,
     backgroundColor: "#ECE7DD",
+  },
+  photoActionRow: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  photoActionButton: {
+    flex: 1,
+    minHeight: 32,
+    borderRadius: 12,
+    backgroundColor: "#F0E9DD",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoActionText: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  smallOutlineButton: {
+    minHeight: 34,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: "#F5F2EA",
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  smallOutlineButtonText: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: "700",
   },
   actionGrid: {
     flexDirection: "row",
@@ -1839,5 +2184,28 @@ const styles = StyleSheet.create({
     color: "#9E4133",
     fontSize: 14,
     lineHeight: 20,
+  },
+  photoViewerBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(10, 12, 11, 0.78)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  photoViewerCard: {
+    width: "100%",
+    alignItems: "center",
+    gap: 12,
+  },
+  photoViewerLabel: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  photoViewerImage: {
+    width: "100%",
+    height: 420,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
 });
