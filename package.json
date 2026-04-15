@@ -1,6 +1,6 @@
 {
   "name": "team-task-mobile",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
@@ -13,7 +13,9 @@
     "@supabase/supabase-js": "^2.103.1",
     "expo": "~54.0.33",
     "expo-auth-session": "^55.0.14",
+    "expo-device": "^55.0.15",
     "expo-image-picker": "^55.0.18",
+    "expo-notifications": "^55.0.19",
     "expo-secure-store": "^55.0.13",
     "expo-status-bar": "~3.0.9",
     "expo-web-browser": "^55.0.14",

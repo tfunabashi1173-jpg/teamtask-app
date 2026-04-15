@@ -482,3 +482,39 @@ export async function leaveGroup(groupId: string, sessionToken: string) {
 
   return readJson<{ ok: boolean; leftWorkspace?: boolean }>(response);
 }
+
+export async function saveExpoPushToken(
+  expoPushToken: string,
+  platform: "ios" | "android",
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl("/api/push/expo"), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify({
+      expoPushToken,
+      platform,
+      deviceLabel: "native-app",
+    }),
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function removeExpoPushToken(expoPushToken: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl("/api/push/expo"), {
+    method: "DELETE",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify({ expoPushToken }),
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}

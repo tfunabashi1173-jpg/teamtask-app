@@ -20,6 +20,9 @@ import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import * as ImagePicker from "expo-image-picker";
 import NetInfo from "@react-native-community/netinfo";
+import * as Device from "expo-device";
+import * as Notifications from "expo-notifications";
+import Constants from "expo-constants";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { fetchBackendVersion } from "./src/lib/backend";
 import {
@@ -36,6 +39,7 @@ import {
   generateGroupInvite,
   leaveGroup,
   removeMember,
+  removeExpoPushToken,
   postTaskAction,
   rejectMembershipRequest,
   replaceReferencePhoto,
@@ -55,11 +59,21 @@ import {
   uploadTaskPhoto,
   updateTask,
   updateWorkspaceSettings,
+  saveExpoPushToken,
 } from "./src/lib/api";
 
 WebBrowser.maybeCompleteAuthSession();
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const SESSION_TOKEN_KEY = "team-task-mobile-session-token";
+const EXPO_PUSH_TOKEN_KEY = "team-task-mobile-expo-push-token";
 const APP_SCHEME = "teamtaskmobile";
 const BRAND = "#1F6B52";
 const SURFACE = "#F5F2EA";
@@ -407,6 +421,10 @@ export default function App() {
   const [notificationTimeDraft, setNotificationTimeDraft] = useState("08:00");
   const [isOnline, setIsOnline] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<
+    "granted" | "denied" | "undetermined"
+  >("undetermined");
+  const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
 
   const loadBackendVersion = useCallback(async () => {
@@ -460,6 +478,13 @@ export default function App() {
       setNotificationTimeDraft(appState.workspace.notification_time.slice(0, 5));
     }
   }, [appState?.workspace?.notification_time]);
+
+  useEffect(() => {
+    void (async () => {
+      const settings = await Notifications.getPermissionsAsync();
+      setNotificationPermission(settings.status);
+    })();
+  }, []);
 
   const refreshData = useCallback(async () => {
     if (!sessionToken) {
@@ -559,12 +584,65 @@ export default function App() {
   }, []);
 
   const handleLogout = useCallback(async () => {
+    const storedPushToken = await SecureStore.getItemAsync(EXPO_PUSH_TOKEN_KEY);
+    if (storedPushToken && sessionToken) {
+      try {
+        await removeExpoPushToken(storedPushToken, sessionToken);
+      } catch {
+        // Ignore push token cleanup failures on logout.
+      }
+    }
     await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+    await SecureStore.deleteItemAsync(EXPO_PUSH_TOKEN_KEY);
     setSessionToken(null);
     setAppState(null);
     setActiveTaskId(null);
     setLoadState("logged_out");
+    setExpoPushToken(null);
   }, []);
+
+  const registerNativePush = useCallback(async () => {
+    if (!sessionToken || !Device.isDevice) {
+      return;
+    }
+
+    const settings = await Notifications.getPermissionsAsync();
+    let status = settings.status;
+
+    if (status !== "granted") {
+      const requestResult = await Notifications.requestPermissionsAsync();
+      status = requestResult.status;
+    }
+
+    setNotificationPermission(status);
+
+    if (status !== "granted") {
+      return;
+    }
+
+    const projectId =
+      Constants.expoConfig?.extra?.eas?.projectId ??
+      Constants.easConfig?.projectId ??
+      process.env.EXPO_PUBLIC_EAS_PROJECT_ID;
+
+    if (!projectId) {
+      return;
+    }
+
+    const tokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
+    const token = tokenResponse.data;
+    setExpoPushToken(token);
+    await SecureStore.setItemAsync(EXPO_PUSH_TOKEN_KEY, token);
+
+    const platform: "ios" | "android" = Device.osName === "Android" ? "android" : "ios";
+    await saveExpoPushToken(token, platform, sessionToken);
+  }, [sessionToken]);
+
+  useEffect(() => {
+    if (loadState === "ready" && sessionToken) {
+      void registerNativePush();
+    }
+  }, [loadState, registerNativePush, sessionToken]);
 
   const handleTaskAction = useCallback(
     async (taskId: string, action: TaskAction) => {
@@ -1278,6 +1356,9 @@ export default function App() {
         <View style={styles.syncCard}>
           <Text style={styles.syncText}>{isOnline ? "オンライン" : "オフライン"}</Text>
           <Text style={styles.syncMeta}>{syncLabel(lastSyncedAt)}</Text>
+          <Text style={styles.syncMeta}>
+            通知権限: {notificationPermission === "granted" ? "許可" : notificationPermission === "denied" ? "拒否" : "未確認"}
+          </Text>
         </View>
 
         <View style={styles.sectionCard}>
