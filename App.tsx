@@ -465,11 +465,20 @@ function groupName(groups: MobileGroup[], groupId: string | null) {
 }
 
 function taskTitle(task: MobileTaskRecord) {
-  if (task.status === "done") {
-    return `✅ ${task.title}`;
-  }
+  return `${taskLeadingBadge(task)} ${task.title}`;
+}
 
-  return `${priorityBadge(task.priority)} ${task.title}`;
+function taskLeadingBadge(task: MobileTaskRecord) {
+  switch (task.status) {
+    case "in_progress":
+      return "🔧";
+    case "awaiting_confirmation":
+      return "👀";
+    case "done":
+      return "✅";
+    default:
+      return priorityBadge(task.priority);
+  }
 }
 
 function priorityLabel(priority: MobileTaskRecord["priority"]) {
@@ -662,6 +671,7 @@ export default function App() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [actingTaskId, setActingTaskId] = useState<string | null>(null);
+  const [actingTaskAction, setActingTaskAction] = useState<TaskAction | null>(null);
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
   const [selectedDate, setSelectedDate] = useState(buildTodayLabel());
@@ -1079,6 +1089,7 @@ export default function App() {
       }
 
       setActingTaskId(taskId);
+      setActingTaskAction(action);
       setErrorMessage(null);
 
       try {
@@ -1088,6 +1099,7 @@ export default function App() {
         setErrorMessage(formatApiError(error));
       } finally {
         setActingTaskId(null);
+        setActingTaskAction(null);
       }
     },
     [refreshData, sessionToken],
@@ -2400,7 +2412,14 @@ export default function App() {
                     onPress={() => openEditModal(selectedTask)}
                     disabled={actingTaskId === selectedTask.id}
                   >
-                    <Text style={styles.actionButtonText}>編集</Text>
+                    {actingTaskId === selectedTask.id ? (
+                      <View style={styles.actionButtonBusyRow}>
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                        <Text style={styles.actionButtonText}>処理中</Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.actionButtonText}>編集</Text>
+                    )}
                   </Pressable>
                   {(["start", "confirm", "complete", "pause", "postpone"] as TaskAction[]).map(
                     (action) => (
@@ -2413,7 +2432,14 @@ export default function App() {
                         onPress={() => void handleTaskAction(selectedTask.id, action)}
                         disabled={actingTaskId === selectedTask.id}
                       >
-                        <Text style={styles.actionButtonText}>{actionLabel(action)}</Text>
+                        {actingTaskId === selectedTask.id && actingTaskAction === action ? (
+                          <View style={styles.actionButtonBusyRow}>
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                            <Text style={styles.actionButtonText}>処理中</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.actionButtonText}>{actionLabel(action)}</Text>
+                        )}
                       </Pressable>
                     ),
                   )}
@@ -4089,6 +4115,12 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 14,
     fontWeight: "700",
+  },
+  actionButtonBusyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
   },
   closeButton: {
     marginTop: 2,

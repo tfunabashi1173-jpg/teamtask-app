@@ -1,6 +1,6 @@
 {
   "name": "team-task-mobile",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
