@@ -117,6 +117,10 @@ export type AppStateResponse = {
   state: MobileAppState;
 };
 
+export type BootstrapResponse = {
+  ok: boolean;
+};
+
 export type SessionExchangeResponse = {
   sessionToken: string;
   user: {
@@ -240,6 +244,27 @@ export async function fetchAppState(sessionToken: string) {
   return readJson<AppStateResponse>(response);
 }
 
+export async function bootstrapWorkspace(
+  payload: {
+    workspaceName: string;
+    groupName: string;
+    displayName: string;
+  },
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl("/api/setup/bootstrap"), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return readJson<BootstrapResponse>(response);
+}
+
 export async function exchangeMobileSession(requestId: string) {
   const response = await fetch(createBackendUrl("/api/auth/mobile/exchange"), {
     method: "POST",
@@ -251,6 +276,26 @@ export async function exchangeMobileSession(requestId: string) {
   });
 
   return readJson<SessionExchangeResponse>(response);
+}
+
+export async function submitMembershipRequest(
+  payload: {
+    inviteToken: string;
+    requestedName: string;
+  },
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl("/api/membership-requests"), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return readJson<{ ok: boolean }>(response);
 }
 
 export async function postTaskAction(taskId: string, action: TaskAction, sessionToken: string) {

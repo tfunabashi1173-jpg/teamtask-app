@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   Image,
   Modal,
+  PanResponder,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -27,6 +29,7 @@ import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import { fetchBackendVersion } from "./src/lib/backend";
 import {
   approveMembershipRequest,
+  bootstrapWorkspace,
   createAuthHeaders,
   createBackendUrl,
   createTask,
@@ -44,6 +47,7 @@ import {
   rejectMembershipRequest,
   replaceReferencePhoto,
   replaceTaskPhoto,
+  submitMembershipRequest,
   type CreateTaskPayload,
   type MobileAppState,
   type MobileGroup,
@@ -112,6 +116,16 @@ type RangeDraft = {
   startDate: string;
   endDate: string;
 };
+type GroupScopeId = string | "personal";
+type InviteDraft = {
+  rawInput: string;
+  requestedName: string;
+};
+type BootstrapDraft = {
+  workspaceName: string;
+  groupName: string;
+  displayName: string;
+};
 
 function requestAgeLabel(value: string) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -177,6 +191,14 @@ function formatApiError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
 
   switch (code) {
+    case "ALREADY_MEMBER":
+      return "このグループには既に参加しています。";
+    case "DUPLICATE_REQUEST":
+      return "参加申請は送信済みです。";
+    case "INVALID_INVITE":
+      return "招待リンクまたは招待コードが無効です。";
+    case "ALREADY_BOOTSTRAPPED":
+      return "初期セットアップは既に完了しています。";
     case "HIGH_PRIORITY_CANNOT_POSTPONE":
       return "高優先度タスクは翌日に回せません。";
     case "ACTOR_NOT_FOUND":
@@ -204,6 +226,8 @@ function formatApiError(error: unknown) {
       return "完了写真はタスク完了後に登録できます。";
     case "PHOTO_PERMISSION_DENIED":
       return "写真ライブラリへのアクセスを許可してください。";
+    case "CAMERA_PERMISSION_DENIED":
+      return "カメラへのアクセスを許可してください。";
     case "FORBIDDEN":
       return "この操作を実行する権限がありません。";
     case "LAST_ADMIN_CANNOT_LEAVE":
@@ -213,6 +237,20 @@ function formatApiError(error: unknown) {
       return "対象データが見つかりません。";
     default:
       return "通信に失敗しました。ネットワーク状態を確認してください。";
+  }
+}
+
+function extractInviteToken(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const url = new URL(trimmed);
+    return url.searchParams.get("invite")?.trim() ?? trimmed;
+  } catch {
+    return trimmed;
   }
 }
 
@@ -391,6 +429,90 @@ function TaskPreviewImage({
   );
 }
 
+function SwipeDismissLogItem({
+  log,
+  busy,
+  onDismiss,
+}: {
+  log: MobileLogRecord;
+  busy: boolean;
+  onDismiss: () => void;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const [opened, setOpened] = useState(false);
+
+  const animateTo = useCallback(
+    (value: number) => {
+      Animated.spring(translateX, {
+        toValue: value,
+        useNativeDriver: true,
+        bounciness: 0,
+      }).start(() => {
+        setOpened(value !== 0);
+      });
+    },
+    [translateX],
+  );
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gesture) =>
+        Math.abs(gesture.dx) > 12 && Math.abs(gesture.dy) < 10,
+      onPanResponderMove: (_, gesture) => {
+        const nextValue = opened ? -88 + gesture.dx : gesture.dx;
+        translateX.setValue(Math.max(-88, Math.min(0, nextValue)));
+      },
+      onPanResponderRelease: (_, gesture) => {
+        const shouldOpen = opened ? gesture.dx < 24 : gesture.dx < -24;
+        animateTo(shouldOpen ? -88 : 0);
+      },
+      onPanResponderTerminate: () => animateTo(opened ? -88 : 0),
+    }),
+  ).current;
+
+  return (
+    <View style={styles.logSwipeFrame}>
+      <View style={styles.logDeleteSlot}>
+        <Pressable
+          style={styles.logDeleteButton}
+          onPress={onDismiss}
+          disabled={busy}
+        >
+          <Text style={styles.logDeleteButtonText}>{busy ? "..." : "削除"}</Text>
+        </Pressable>
+      </View>
+      <Animated.View
+        style={[styles.logSwipeCard, { transform: [{ translateX }] }]}
+        {...panResponder.panHandlers}
+      >
+        <View style={styles.logBubble}>
+          {log.actor?.line_picture_url ? (
+            // eslint-disable-next-line jsx-a11y/alt-text
+            <Image source={{ uri: log.actor.line_picture_url }} style={styles.logAvatar} />
+          ) : (
+            <View style={styles.logAvatarFallback}>
+              <Text style={styles.logAvatarFallbackText}>
+                {(log.actor?.display_name ?? "?").slice(0, 1)}
+              </Text>
+            </View>
+          )}
+          <View style={styles.logBody}>
+            <Text style={styles.logText}>{logMessage(log)}</Text>
+            <Text style={styles.logTime}>
+              {new Intl.DateTimeFormat("ja-JP", {
+                month: "numeric",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              }).format(new Date(log.created_at))}
+            </Text>
+          </View>
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
 export default function App() {
   const [loadState, setLoadState] = useState<LoadState>("booting");
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -407,6 +529,7 @@ export default function App() {
   const [draftTask, setDraftTask] = useState<DraftTask>(() => createDefaultDraft(buildTodayLabel()));
   const [editorMode, setEditorMode] = useState<EditorMode>("create");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [selectedGroupScope, setSelectedGroupScope] = useState<GroupScopeId>("personal");
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
   const [photoViewer, setPhotoViewer] = useState<{ uri: string; label: string } | null>(null);
@@ -418,6 +541,15 @@ export default function App() {
   });
   const [managementModalVisible, setManagementModalVisible] = useState(false);
   const [managementBusyKey, setManagementBusyKey] = useState<string | null>(null);
+  const [joinModalVisible, setJoinModalVisible] = useState(false);
+  const [inviteDraft, setInviteDraft] = useState<InviteDraft>({ rawInput: "", requestedName: "" });
+  const [joiningInvite, setJoiningInvite] = useState(false);
+  const [bootstrapBusy, setBootstrapBusy] = useState(false);
+  const [bootstrapDraft, setBootstrapDraft] = useState<BootstrapDraft>({
+    workspaceName: "",
+    groupName: "",
+    displayName: "",
+  });
   const [notificationTimeDraft, setNotificationTimeDraft] = useState("08:00");
   const [isOnline, setIsOnline] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -539,6 +671,29 @@ export default function App() {
     };
   }, [refreshData, sessionToken]);
 
+  const performInviteJoin = useCallback(
+    async (rawInput: string, requestedName: string, authToken: string) => {
+      const inviteToken = extractInviteToken(rawInput);
+      if (!inviteToken || !requestedName.trim()) {
+        throw new Error("INVALID_INPUT");
+      }
+
+      await submitMembershipRequest(
+        {
+          inviteToken,
+          requestedName: requestedName.trim(),
+        },
+        authToken,
+      );
+      const response = await fetchAppState(authToken);
+      setAppState(response.state);
+      setLastSyncedAt(new Date().toISOString());
+      setJoinModalVisible(false);
+      Alert.alert("参加申請を送信しました", "管理者の承認後にグループへ参加できます。");
+    },
+    [],
+  );
+
   const handleLogin = useCallback(async () => {
     setLoggingIn(true);
     setErrorMessage(null);
@@ -574,6 +729,13 @@ export default function App() {
       const response = await fetchAppState(exchange.sessionToken);
       setAppState(response.state);
       setLoadState("ready");
+      if (inviteDraft.rawInput.trim() && inviteDraft.requestedName.trim()) {
+        await performInviteJoin(
+          inviteDraft.rawInput,
+          inviteDraft.requestedName,
+          exchange.sessionToken,
+        );
+      }
     } catch (error) {
       if (!(error instanceof Error && error.message === "LOGIN_CANCELLED")) {
         setErrorMessage(formatApiError(error));
@@ -581,7 +743,7 @@ export default function App() {
     } finally {
       setLoggingIn(false);
     }
-  }, []);
+  }, [inviteDraft.rawInput, inviteDraft.requestedName, performInviteJoin]);
 
   const handleLogout = useCallback(async () => {
     const storedPushToken = await SecureStore.getItemAsync(EXPO_PUSH_TOKEN_KEY);
@@ -666,7 +828,35 @@ export default function App() {
   );
 
   const today = useMemo(buildTodayLabel, []);
-  const primaryGroup = useMemo(() => appState?.groups[0] ?? null, [appState?.groups]);
+  const selectedGroup = useMemo(
+    () =>
+      selectedGroupScope === "personal"
+        ? null
+        : (appState?.groups.find((group) => group.id === selectedGroupScope) ?? null),
+    [appState?.groups, selectedGroupScope],
+  );
+
+  useEffect(() => {
+    if (!appState) {
+      return;
+    }
+
+    const availableScopes: GroupScopeId[] = ["personal", ...appState.groups.map((group) => group.id)];
+    if (!availableScopes.includes(selectedGroupScope)) {
+      setSelectedGroupScope(appState.groups[0]?.id ?? "personal");
+    }
+  }, [appState, selectedGroupScope]);
+
+  useEffect(() => {
+    if (appState?.appUser?.display_name) {
+      setBootstrapDraft((current) =>
+        current.displayName ? current : { ...current, displayName: appState.appUser?.display_name ?? "" },
+      );
+      setInviteDraft((current) =>
+        current.requestedName ? current : { ...current, requestedName: appState.appUser?.display_name ?? "" },
+      );
+    }
+  }, [appState?.appUser?.display_name]);
 
   const visibleTasks = useMemo(() => {
     if (!appState) {
@@ -674,9 +864,19 @@ export default function App() {
     }
 
     return appState.tasks
-      .filter((task) => task.scheduled_date === selectedDate)
+      .filter((task) => {
+        if (task.scheduled_date !== selectedDate) {
+          return false;
+        }
+
+        if (selectedGroupScope === "personal") {
+          return task.visibility_type === "personal" || !task.group_id;
+        }
+
+        return task.group_id === selectedGroupScope;
+      })
       .sort(compareTaskOrder);
-  }, [appState, selectedDate]);
+  }, [appState, selectedDate, selectedGroupScope]);
 
   const selectedTask = useMemo(
     () => visibleTasks.find((task) => task.id === activeTaskId) ?? null,
@@ -695,8 +895,19 @@ export default function App() {
   }, [visibleTasks]);
 
   const copyableTasks = useMemo(
-    () => (appState?.tasks ?? []).slice().sort(compareTaskOrder).slice(0, 12),
-    [appState?.tasks],
+    () =>
+      (appState?.tasks ?? [])
+        .filter((task) => {
+          if (selectedGroupScope === "personal") {
+            return task.visibility_type === "personal" || !task.group_id;
+          }
+
+          return task.group_id === selectedGroupScope;
+        })
+        .slice()
+        .sort(compareTaskOrder)
+        .slice(0, 12),
+    [appState?.tasks, selectedGroupScope],
   );
 
   const visibleLogs = useMemo(() => {
@@ -713,10 +924,17 @@ export default function App() {
     }
 
     return appState.tasks
-      .filter(
-        (task) =>
-          task.scheduled_date >= rangeDraft.startDate && task.scheduled_date <= rangeDraft.endDate,
-      )
+      .filter((task) => {
+        if (!(task.scheduled_date >= rangeDraft.startDate && task.scheduled_date <= rangeDraft.endDate)) {
+          return false;
+        }
+
+        if (selectedGroupScope === "personal") {
+          return task.visibility_type === "personal" || !task.group_id;
+        }
+
+        return task.group_id === selectedGroupScope;
+      })
       .sort((left, right) => {
         const dateDiff = left.scheduled_date.localeCompare(right.scheduled_date);
         if (dateDiff !== 0) {
@@ -724,7 +942,7 @@ export default function App() {
         }
         return compareTaskOrder(left, right);
       });
-  }, [appState, rangeDraft.endDate, rangeDraft.startDate]);
+  }, [appState, rangeDraft.endDate, rangeDraft.startDate, selectedGroupScope]);
 
   const isAdmin = appState?.appUser?.role === "admin";
   const pendingRequests = appState?.pendingRequests ?? [];
@@ -844,8 +1062,8 @@ export default function App() {
           priority: draftTask.priority,
           scheduledDate: draftTask.scheduledDate,
           scheduledTime: draftTask.scheduledTime || null,
-          visibilityType: primaryGroup ? "group" : "personal",
-          groupId: primaryGroup?.id ?? null,
+          visibilityType: selectedGroup ? "group" : "personal",
+          groupId: selectedGroup?.id ?? null,
           recurrence: recurrencePayload,
         };
 
@@ -867,8 +1085,8 @@ export default function App() {
     draftTask,
     editorMode,
     editingTaskId,
-    primaryGroup,
     refreshData,
+    selectedGroup,
     selectedDate,
     sessionToken,
   ]);
@@ -927,7 +1145,7 @@ export default function App() {
   );
 
   const handleGenerateInvite = useCallback(async () => {
-    if (!sessionToken || !primaryGroup?.id) {
+    if (!sessionToken || !selectedGroup?.id) {
       return;
     }
 
@@ -935,7 +1153,7 @@ export default function App() {
     setErrorMessage(null);
 
     try {
-      const result = await generateGroupInvite(primaryGroup.id, sessionToken);
+      const result = await generateGroupInvite(selectedGroup.id, sessionToken);
       await Share.share({
         message: result.inviteUrl,
         url: result.inviteUrl,
@@ -946,7 +1164,7 @@ export default function App() {
     } finally {
       setManagementBusyKey(null);
     }
-  }, [primaryGroup?.id, refreshData, sessionToken]);
+  }, [refreshData, selectedGroup?.id, sessionToken]);
 
   const handleApproveRequest = useCallback(
     async (requestId: string) => {
@@ -1040,11 +1258,11 @@ export default function App() {
   }, [notificationTimeDraft, refreshData, sessionToken]);
 
   const handleLeaveCurrentGroup = useCallback(() => {
-    if (!sessionToken || !primaryGroup?.id) {
+    if (!sessionToken || !selectedGroup?.id) {
       return;
     }
 
-    Alert.alert("グループから退出", `${primaryGroup.name} から退出します。`, [
+    Alert.alert("グループから退出", `${selectedGroup.name} から退出します。`, [
       { text: "キャンセル", style: "cancel" },
       {
         text: "退出",
@@ -1054,7 +1272,7 @@ export default function App() {
             setManagementBusyKey("leave-group");
             setErrorMessage(null);
             try {
-              await leaveGroup(primaryGroup.id, sessionToken);
+              await leaveGroup(selectedGroup.id, sessionToken);
               setManagementModalVisible(false);
               await refreshData();
             } catch (error) {
@@ -1066,19 +1284,51 @@ export default function App() {
         },
       },
     ]);
-  }, [primaryGroup?.id, primaryGroup?.name, refreshData, sessionToken]);
+  }, [refreshData, selectedGroup?.id, selectedGroup?.name, sessionToken]);
+
+  const chooseImageSource = useCallback(() => {
+    return new Promise<"camera" | "library" | null>((resolve) => {
+      Alert.alert("画像を追加", "撮影またはライブラリから選択できます。", [
+        { text: "キャンセル", style: "cancel", onPress: () => resolve(null) },
+        { text: "撮影", onPress: () => resolve("camera") },
+        { text: "ライブラリ", onPress: () => resolve("library") },
+      ]);
+    });
+  }, []);
 
   const pickImageAsset = useCallback(async (): Promise<UploadableImage | null> => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      throw new Error("PHOTO_PERMISSION_DENIED");
+    const source = await chooseImageSource();
+    if (!source) {
+      return null;
     }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsEditing: true,
-      quality: 0.85,
-    });
+    let result:
+      | ImagePicker.ImagePickerResult
+      | null = null;
+
+    if (source === "camera") {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        throw new Error("CAMERA_PERMISSION_DENIED");
+      }
+
+      result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.85,
+      });
+    } else {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        throw new Error("PHOTO_PERMISSION_DENIED");
+      }
+
+      result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.85,
+      });
+    }
 
     if (result.canceled) {
       return null;
@@ -1091,10 +1341,66 @@ export default function App() {
 
     return {
       uri: asset.uri,
-      name: asset.fileName ?? `photo-${Date.now()}.jpg`,
+      name:
+        asset.fileName ?? `${source === "camera" ? "camera" : "photo"}-${Date.now()}.jpg`,
       mimeType: asset.mimeType ?? "image/jpeg",
     };
-  }, []);
+  }, [chooseImageSource]);
+
+  const handleSubmitJoinRequest = useCallback(async () => {
+    if (!inviteDraft.rawInput.trim() || !inviteDraft.requestedName.trim()) {
+      setErrorMessage("招待リンクと表示名を入力してください。");
+      return;
+    }
+
+    if (!sessionToken) {
+      await handleLogin();
+      return;
+    }
+
+    setJoiningInvite(true);
+    setErrorMessage(null);
+    try {
+      await performInviteJoin(inviteDraft.rawInput, inviteDraft.requestedName, sessionToken);
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setJoiningInvite(false);
+    }
+  }, [handleLogin, inviteDraft.rawInput, inviteDraft.requestedName, performInviteJoin, sessionToken]);
+
+  const handleBootstrap = useCallback(async () => {
+    if (!sessionToken) {
+      return;
+    }
+
+    if (
+      !bootstrapDraft.workspaceName.trim() ||
+      !bootstrapDraft.groupName.trim() ||
+      !bootstrapDraft.displayName.trim()
+    ) {
+      setErrorMessage("ワークスペース名、グループ名、表示名を入力してください。");
+      return;
+    }
+
+    setBootstrapBusy(true);
+    setErrorMessage(null);
+    try {
+      await bootstrapWorkspace(
+        {
+          workspaceName: bootstrapDraft.workspaceName.trim(),
+          groupName: bootstrapDraft.groupName.trim(),
+          displayName: bootstrapDraft.displayName.trim(),
+        },
+        sessionToken,
+      );
+      await refreshData();
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    } finally {
+      setBootstrapBusy(false);
+    }
+  }, [bootstrapDraft.displayName, bootstrapDraft.groupName, bootstrapDraft.workspaceName, refreshData, sessionToken]);
 
   const handleReferencePhotoUpload = useCallback(
     async (taskId: string, photoId?: string) => {
@@ -1257,6 +1563,13 @@ export default function App() {
             )}
           </Pressable>
 
+          <Pressable
+            style={styles.secondaryModalButton}
+            onPress={() => setJoinModalVisible(true)}
+          >
+            <Text style={styles.secondaryModalButtonText}>招待リンクで参加</Text>
+          </Pressable>
+
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
 
           <View style={styles.versionCard}>
@@ -1265,6 +1578,77 @@ export default function App() {
             <Text style={styles.versionCommit}>{backendVersion?.commitSha ?? "-"}</Text>
           </View>
         </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (appState?.needsBootstrap) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" />
+        <ExpoStatusBar style="dark" />
+        <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+          <View style={styles.sectionCard}>
+            <Text style={styles.eyebrow}>INITIAL SETUP</Text>
+            <Text style={styles.sectionTitle}>最初のワークスペースを作成</Text>
+            <Text style={styles.modalMeta}>
+              初回のみ、ワークスペース名と最初のグループ名、表示名を登録します。
+            </Text>
+
+            <View style={styles.formSection}>
+              <Text style={styles.fieldLabel}>ワークスペース名</Text>
+              <TextInput
+                value={bootstrapDraft.workspaceName}
+                onChangeText={(workspaceName) =>
+                  setBootstrapDraft((current) => ({ ...current, workspaceName }))
+                }
+                placeholder="会社名や拠点名"
+                placeholderTextColor="#A59C91"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.formSection}>
+              <Text style={styles.fieldLabel}>最初のグループ名</Text>
+              <TextInput
+                value={bootstrapDraft.groupName}
+                onChangeText={(groupName) =>
+                  setBootstrapDraft((current) => ({ ...current, groupName }))
+                }
+                placeholder="品川Cタスク管理"
+                placeholderTextColor="#A59C91"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.formSection}>
+              <Text style={styles.fieldLabel}>あなたの表示名</Text>
+              <TextInput
+                value={bootstrapDraft.displayName}
+                onChangeText={(displayName) =>
+                  setBootstrapDraft((current) => ({ ...current, displayName }))
+                }
+                placeholder="表示名"
+                placeholderTextColor="#A59C91"
+                style={styles.textInput}
+              />
+            </View>
+
+            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+
+            <Pressable
+              style={[styles.primaryButton, bootstrapBusy && styles.primaryButtonDisabled]}
+              onPress={() => void handleBootstrap()}
+              disabled={bootstrapBusy}
+            >
+              {bootstrapBusy ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.primaryButtonText}>作成して開始</Text>
+              )}
+            </Pressable>
+          </View>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -1284,13 +1668,42 @@ export default function App() {
               <Text style={styles.eyebrow}>TASK BOARD</Text>
               <Text style={styles.heroTitle}>{formatTaskDateLabel(selectedDate)}</Text>
               <Text style={styles.heroSubtitle}>
-                {primaryGroup?.name ?? appState?.workspace?.name ?? "ワークスペース未設定"}
+                {selectedGroup?.name ?? "個人タスク"}
               </Text>
             </View>
             <Pressable style={styles.fabButton} onPress={openCreateModal}>
               <Text style={styles.fabButtonText}>＋</Text>
             </Pressable>
           </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.scopeRow}
+          >
+            {[{ id: "personal" as GroupScopeId, name: "個人" }, ...(appState?.groups ?? []).map((group) => ({
+              id: group.id as GroupScopeId,
+              name: group.name,
+            }))].map((scope) => (
+              <Pressable
+                key={scope.id}
+                style={[
+                  styles.scopeChip,
+                  selectedGroupScope === scope.id && styles.scopeChipActive,
+                ]}
+                onPress={() => setSelectedGroupScope(scope.id)}
+              >
+                <Text
+                  style={[
+                    styles.scopeChipText,
+                    selectedGroupScope === scope.id && styles.scopeChipTextActive,
+                  ]}
+                >
+                  {scope.name}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
 
           <View style={styles.summaryGrid}>
             <View style={styles.summaryCard}>
@@ -1363,7 +1776,7 @@ export default function App() {
 
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>本日のタスク</Text>
+            <Text style={styles.sectionTitle}>タスク</Text>
             <View style={styles.headerActionRow}>
               <Pressable onPress={openManagementModal}>
                 <Text style={styles.linkText}>
@@ -1424,38 +1837,12 @@ export default function App() {
           </View>
           {visibleLogs.length ? (
             visibleLogs.map((log) => (
-              <View key={log.id} style={styles.logBubble}>
-                {log.actor?.line_picture_url ? (
-                  // eslint-disable-next-line jsx-a11y/alt-text
-                  <Image source={{ uri: log.actor.line_picture_url }} style={styles.logAvatar} />
-                ) : (
-                  <View style={styles.logAvatarFallback}>
-                    <Text style={styles.logAvatarFallbackText}>
-                      {(log.actor?.display_name ?? "?").slice(0, 1)}
-                    </Text>
-                  </View>
-                )}
-                <View style={styles.logBody}>
-                  <Text style={styles.logText}>{logMessage(log)}</Text>
-                  <Text style={styles.logTime}>
-                    {new Intl.DateTimeFormat("ja-JP", {
-                      month: "numeric",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    }).format(new Date(log.created_at))}
-                  </Text>
-                </View>
-                <Pressable
-                  style={styles.logDismissButton}
-                  onPress={() => void handleDismissLog(log.id)}
-                  disabled={dismissingLogId === log.id}
-                >
-                  <Text style={styles.logDismissButtonText}>
-                    {dismissingLogId === log.id ? "..." : "閉じる"}
-                  </Text>
-                </Pressable>
-              </View>
+              <SwipeDismissLogItem
+                key={log.id}
+                log={log}
+                busy={dismissingLogId === log.id}
+                onDismiss={() => void handleDismissLog(log.id)}
+              />
             ))
           ) : (
             <Text style={styles.emptyText}>新しい通知はありません。</Text>
@@ -1754,7 +2141,43 @@ export default function App() {
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={styles.modalTitle}>グループ詳細</Text>
-              <Text style={styles.modalMeta}>{primaryGroup?.name ?? "グループ未設定"}</Text>
+              <Text style={styles.modalMeta}>{selectedGroup?.name ?? "個人タスク"}</Text>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.scopeRow}
+              >
+                {[{ id: "personal" as GroupScopeId, name: "個人" }, ...(appState?.groups ?? []).map((group) => ({
+                  id: group.id as GroupScopeId,
+                  name: group.name,
+                }))].map((scope) => (
+                  <Pressable
+                    key={scope.id}
+                    style={[
+                      styles.scopeChip,
+                      selectedGroupScope === scope.id && styles.scopeChipActive,
+                    ]}
+                    onPress={() => setSelectedGroupScope(scope.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.scopeChipText,
+                        selectedGroupScope === scope.id && styles.scopeChipTextActive,
+                      ]}
+                    >
+                      {scope.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              <Pressable
+                style={styles.secondaryModalButton}
+                onPress={() => setJoinModalVisible(true)}
+              >
+                <Text style={styles.secondaryModalButtonText}>招待リンクで参加</Text>
+              </Pressable>
 
               {isAdmin ? (
                 <>
@@ -1823,7 +2246,14 @@ export default function App() {
                   <View style={styles.formSection}>
                     <View style={styles.photoSectionHeader}>
                       <Text style={styles.fieldLabel}>メンバー</Text>
-                      <Pressable style={styles.smallOutlineButton} onPress={() => void handleGenerateInvite()}>
+                      <Pressable
+                        style={[
+                          styles.smallOutlineButton,
+                          !selectedGroup && styles.disabledOutlineButton,
+                        ]}
+                        onPress={() => void handleGenerateInvite()}
+                        disabled={!selectedGroup}
+                      >
                         <Text style={styles.smallOutlineButtonText}>
                           {managementBusyKey === "invite" ? "..." : "招待リンク"}
                         </Text>
@@ -1852,11 +2282,15 @@ export default function App() {
               ) : (
                 <View style={styles.formSection}>
                   <Text style={styles.fieldLabel}>危険操作</Text>
-                  <Pressable style={[styles.closeButton, styles.deleteButton]} onPress={handleLeaveCurrentGroup}>
-                    <Text style={styles.deleteButtonText}>
-                      {managementBusyKey === "leave-group" ? "..." : "このグループから退出"}
-                    </Text>
-                  </Pressable>
+                  {selectedGroup ? (
+                    <Pressable style={[styles.closeButton, styles.deleteButton]} onPress={handleLeaveCurrentGroup}>
+                      <Text style={styles.deleteButtonText}>
+                        {managementBusyKey === "leave-group" ? "..." : "このグループから退出"}
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Text style={styles.emptyText}>個人タスク表示では退出対象のグループはありません。</Text>
+                  )}
                 </View>
               )}
 
@@ -1883,7 +2317,7 @@ export default function App() {
               <Text style={styles.modalMeta}>
                 {editorMode === "edit"
                   ? "内容を更新します"
-                  : `追加先: ${primaryGroup ? `${primaryGroup.name} に共有` : "個人タスク"}`}
+                  : `追加先: ${selectedGroup ? `${selectedGroup.name} に共有` : "個人タスク"}`}
               </Text>
 
               {editorMode === "create" ? (
@@ -2151,6 +2585,69 @@ export default function App() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal
+        visible={joinModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setJoinModalVisible(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setJoinModalVisible(false)}>
+          <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <Text style={styles.modalTitle}>招待リンクで参加</Text>
+            <Text style={styles.modalMeta}>
+              招待 URL 全体または末尾の招待コードを入力してください。
+            </Text>
+
+            <View style={styles.formSection}>
+              <Text style={styles.fieldLabel}>招待リンク / 招待コード</Text>
+              <TextInput
+                value={inviteDraft.rawInput}
+                onChangeText={(rawInput) => setInviteDraft((current) => ({ ...current, rawInput }))}
+                placeholder="https://.../?invite=xxxx"
+                placeholderTextColor="#A59C91"
+                style={styles.textInput}
+                autoCapitalize="none"
+              />
+            </View>
+
+            <View style={styles.formSection}>
+              <Text style={styles.fieldLabel}>表示名</Text>
+              <TextInput
+                value={inviteDraft.requestedName}
+                onChangeText={(requestedName) =>
+                  setInviteDraft((current) => ({ ...current, requestedName }))
+                }
+                placeholder="参加時の表示名"
+                placeholderTextColor="#A59C91"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.modalActionRow}>
+              <Pressable
+                style={styles.secondaryModalButton}
+                onPress={() => setJoinModalVisible(false)}
+              >
+                <Text style={styles.secondaryModalButtonText}>閉じる</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.primaryButton, styles.modalPrimaryButton]}
+                onPress={() => void handleSubmitJoinRequest()}
+                disabled={joiningInvite || loggingIn}
+              >
+                {joiningInvite || loggingIn ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>
+                    {sessionToken ? "申請する" : "LINEログインして申請"}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -2263,6 +2760,31 @@ const styles = StyleSheet.create({
   heroSubtitle: {
     color: MUTED,
     fontSize: 15,
+  },
+  scopeRow: {
+    gap: 8,
+    paddingTop: 2,
+    paddingBottom: 2,
+  },
+  scopeChip: {
+    borderRadius: 999,
+    backgroundColor: "#F3EEE4",
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  scopeChipActive: {
+    backgroundColor: BRAND,
+    borderColor: BRAND,
+  },
+  scopeChipText: {
+    color: TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  scopeChipTextActive: {
+    color: "#FFFFFF",
   },
   daySwitcherRow: {
     flexDirection: "row",
@@ -2486,6 +3008,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
+  disabledOutlineButton: {
+    opacity: 0.45,
+  },
   taskBadgeWrap: {
     alignItems: "flex-end",
     gap: 6,
@@ -2517,6 +3042,36 @@ const styles = StyleSheet.create({
     backgroundColor: "#EEF1EB",
     padding: 14,
     alignItems: "flex-start",
+  },
+  logSwipeFrame: {
+    overflow: "hidden",
+    borderRadius: 22,
+  },
+  logSwipeCard: {
+    zIndex: 1,
+  },
+  logDeleteSlot: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 92,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingRight: 6,
+  },
+  logDeleteButton: {
+    width: 76,
+    height: "100%",
+    borderRadius: 22,
+    backgroundColor: "#EADCD7",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  logDeleteButtonText: {
+    color: "#8E3B2D",
+    fontSize: 13,
+    fontWeight: "700",
   },
   logAvatar: {
     width: 42,
