@@ -108,7 +108,9 @@ export type MobileAppState = {
   members: MobileMemberRecord[];
   pendingRequests: MobileMembershipRequestRecord[];
   activeInvite: MobileInviteRecord | null;
+  pendingOwnRequest: MobileMembershipRequestRecord | null;
   needsBootstrap: boolean;
+  bootstrapAllowed: boolean;
   authConfigured: boolean;
 };
 

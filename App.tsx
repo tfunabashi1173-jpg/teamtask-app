@@ -2131,7 +2131,7 @@ export default function App() {
     );
   }
 
-  if (appState?.needsBootstrap) {
+  if (appState?.needsBootstrap && appState?.bootstrapAllowed) {
     return (
       <SafeAreaView style={styles.safeArea}>
         <StatusBar barStyle="dark-content" />
@@ -2195,6 +2195,78 @@ export default function App() {
               ) : (
                 <Text style={styles.primaryButtonText}>作成して開始</Text>
               )}
+            </Pressable>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  if (appState?.needsBootstrap && !appState?.bootstrapAllowed) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" />
+        <ExpoStatusBar style="dark" />
+        <View style={styles.loginScreen}>
+          <Text style={styles.eyebrow}>TEAM TASK NATIVE</Text>
+          <Text style={styles.loginTitle}>初期設定待ち</Text>
+          <Text style={styles.loginDescription}>
+            このアプリはまだ初期設定が完了していません。許可された管理者が最初のワークスペースを作成するまでお待ちください。
+          </Text>
+          <Pressable style={styles.secondaryModalButton} onPress={() => void handleLogout()}>
+            <Text style={styles.secondaryModalButtonText}>ログアウト</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!appState?.appUser || !appState?.workspace) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" />
+        <ExpoStatusBar style="dark" />
+        <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+          <View style={styles.sectionCard}>
+            <Text style={styles.eyebrow}>TEAM TASK ACCESS</Text>
+            <Text style={styles.sectionTitle}>
+              {appState?.pendingOwnRequest ? "承認待ち" : "参加申請"}
+            </Text>
+            <Text style={styles.modalMeta}>
+              {appState?.pendingOwnRequest
+                ? "登録申請を送信済みです。管理者の承認後に利用可能になります。"
+                : "未承認のため、現在は参加申請のみ可能です。"}
+            </Text>
+
+            {appState?.pendingOwnRequest ? (
+              <View style={styles.managementCard}>
+                <View style={styles.managementBody}>
+                  <Text style={styles.managementTitle}>
+                    {appState.pendingOwnRequest.requested_name}
+                  </Text>
+                  <Text style={styles.managementMetaText}>
+                    申請日時: {requestAgeLabel(appState.pendingOwnRequest.created_at)}
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.emptyText}>
+                  有効な招待リンクを受け取ったうえで参加申請してください。
+                </Text>
+                <Pressable
+                  style={styles.primaryButton}
+                  onPress={() => setJoinModalVisible(true)}
+                >
+                  <Text style={styles.primaryButtonText}>招待リンクで参加申請</Text>
+                </Pressable>
+              </>
+            )}
+
+            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+
+            <Pressable style={styles.secondaryModalButton} onPress={() => void handleLogout()}>
+              <Text style={styles.secondaryModalButtonText}>ログアウト</Text>
             </Pressable>
           </View>
         </ScrollView>

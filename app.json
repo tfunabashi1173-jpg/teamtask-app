@@ -2,7 +2,7 @@
   "expo": {
     "name": "Team Task Mobile",
     "slug": "team-task-mobile",
-    "version": "0.1.59",
+    "version": "0.1.60",
     "scheme": "teamtaskmobile",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
