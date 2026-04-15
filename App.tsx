@@ -118,7 +118,7 @@ type RangeDraft = {
   startDate: string;
   endDate: string;
 };
-type GroupScopeId = string | "personal";
+type GroupScopeId = string;
 type InviteDraft = {
   rawInput: string;
   requestedName: string;
@@ -131,6 +131,9 @@ type BootstrapDraft = {
 type GroupDraft = {
   name: string;
   description: string;
+};
+type DraftReferencePhoto = UploadableImage & {
+  previewUri: string;
 };
 
 function requestAgeLabel(value: string) {
@@ -271,14 +274,21 @@ function formatTaskDateLabel(value: string) {
   }).format(date);
 }
 
+function formatLocalDate(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function buildTodayLabel() {
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate(new Date());
 }
 
 function shiftDate(value: string, amount: number) {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + amount);
-  return date.toISOString().slice(0, 10);
+  return formatLocalDate(date);
 }
 
 function recurrenceSummary(task: MobileTaskRecord) {
@@ -386,27 +396,35 @@ function logMessage(log: MobileLogRecord) {
 
 function groupName(groups: MobileGroup[], groupId: string | null) {
   if (!groupId) {
-    return "個人";
+    return "";
   }
 
   return groups.find((group) => group.id === groupId)?.name ?? "グループ";
 }
 
 function taskTitle(task: MobileTaskRecord) {
-  return task.status === "done" ? `✅ ${task.title}` : task.title;
+  if (task.status === "done") {
+    return `✅ ${task.title}`;
+  }
+
+  return `${priorityBadge(task.priority)} ${task.title}`;
 }
 
 function priorityLabel(priority: MobileTaskRecord["priority"]) {
   switch (priority) {
     case "urgent":
-      return "緊急";
+      return "🚨";
     case "high":
-      return "高";
+      return "🔴";
     case "medium":
-      return "中";
+      return "🟠";
     default:
-      return "低";
+      return "⚪️";
   }
+}
+
+function priorityBadge(priority: MobileTaskRecord["priority"]) {
+  return priorityLabel(priority);
 }
 
 function TaskPreviewImage({
@@ -550,11 +568,12 @@ export default function App() {
   const [draftTask, setDraftTask] = useState<DraftTask>(() => createDefaultDraft(buildTodayLabel()));
   const [editorMode, setEditorMode] = useState<EditorMode>("create");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [selectedGroupScope, setSelectedGroupScope] = useState<GroupScopeId>("personal");
+  const [selectedGroupScope, setSelectedGroupScope] = useState<GroupScopeId>("");
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
   const [photoViewer, setPhotoViewer] = useState<{ uri: string; label: string } | null>(null);
   const [uploadingPhotoKey, setUploadingPhotoKey] = useState<string | null>(null);
+  const [draftReferencePhotos, setDraftReferencePhotos] = useState<DraftReferencePhoto[]>([]);
   const [listModalVisible, setListModalVisible] = useState(false);
   const [rangeDraft, setRangeDraft] = useState<RangeDraft>({
     startDate: buildTodayLabel(),
@@ -651,6 +670,17 @@ export default function App() {
       setNotificationPermission(settings.status);
     })();
   }, []);
+
+  useEffect(() => {
+    if (loadState !== "ready") {
+      return;
+    }
+
+    void (async () => {
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+      await ImagePicker.requestCameraPermissionsAsync();
+    })();
+  }, [loadState]);
 
   const refreshData = useCallback(async () => {
     if (!sessionToken) {
@@ -863,10 +893,7 @@ export default function App() {
 
   const today = useMemo(buildTodayLabel, []);
   const selectedGroup = useMemo(
-    () =>
-      selectedGroupScope === "personal"
-        ? null
-        : (appState?.groups.find((group) => group.id === selectedGroupScope) ?? null),
+    () => appState?.groups.find((group) => group.id === selectedGroupScope) ?? null,
     [appState?.groups, selectedGroupScope],
   );
 
@@ -875,9 +902,9 @@ export default function App() {
       return;
     }
 
-    const availableScopes: GroupScopeId[] = ["personal", ...appState.groups.map((group) => group.id)];
+    const availableScopes: GroupScopeId[] = appState.groups.map((group) => group.id);
     if (!availableScopes.includes(selectedGroupScope)) {
-      setSelectedGroupScope(appState.groups[0]?.id ?? "personal");
+      setSelectedGroupScope(appState.groups[0]?.id ?? "");
     }
   }, [appState, selectedGroupScope]);
 
@@ -903,11 +930,7 @@ export default function App() {
           return false;
         }
 
-        if (selectedGroupScope === "personal") {
-          return task.visibility_type === "personal" || !task.group_id;
-        }
-
-        return task.group_id === selectedGroupScope;
+        return Boolean(selectedGroupScope) && task.group_id === selectedGroupScope;
       })
       .sort(compareTaskOrder);
   }, [appState, selectedDate, selectedGroupScope]);
@@ -931,13 +954,7 @@ export default function App() {
   const copyableTasks = useMemo(
     () =>
       (appState?.tasks ?? [])
-        .filter((task) => {
-          if (selectedGroupScope === "personal") {
-            return task.visibility_type === "personal" || !task.group_id;
-          }
-
-          return task.group_id === selectedGroupScope;
-        })
+        .filter((task) => Boolean(selectedGroupScope) && task.group_id === selectedGroupScope)
         .slice()
         .sort(compareTaskOrder)
         .slice(0, 12),
@@ -963,11 +980,7 @@ export default function App() {
           return false;
         }
 
-        if (selectedGroupScope === "personal") {
-          return task.visibility_type === "personal" || !task.group_id;
-        }
-
-        return task.group_id === selectedGroupScope;
+        return Boolean(selectedGroupScope) && task.group_id === selectedGroupScope;
       })
       .sort((left, right) => {
         const dateDiff = left.scheduled_date.localeCompare(right.scheduled_date);
@@ -984,6 +997,7 @@ export default function App() {
 
   const openCreateModal = useCallback(() => {
     setDraftTask(createDefaultDraft(selectedDate));
+    setDraftReferencePhotos([]);
     setEditorMode("create");
     setEditingTaskId(null);
     setCreateModalVisible(true);
@@ -1003,6 +1017,7 @@ export default function App() {
 
   const openEditModal = useCallback((task: MobileTaskRecord) => {
     setDraftTask(createDraftFromTask(task));
+    setDraftReferencePhotos([]);
     setEditorMode("edit");
     setEditingTaskId(task.id);
     setCreateModalVisible(true);
@@ -1044,6 +1059,11 @@ export default function App() {
 
   const saveTask = useCallback(async () => {
     if (!sessionToken || !appState?.workspace) {
+      return;
+    }
+
+    if (!selectedGroup) {
+      setErrorMessage("追加先のグループを選択してください。");
       return;
     }
 
@@ -1096,16 +1116,21 @@ export default function App() {
           priority: draftTask.priority,
           scheduledDate: draftTask.scheduledDate,
           scheduledTime: draftTask.scheduledTime || null,
-          visibilityType: selectedGroup ? "group" : "personal",
-          groupId: selectedGroup?.id ?? null,
+          visibilityType: "group",
+          groupId: selectedGroup.id,
           recurrence: recurrencePayload,
         };
 
-        await createTask(payload, sessionToken);
+        const createdTask = await createTask(payload, sessionToken);
+
+        for (const photo of draftReferencePhotos) {
+          await uploadReferencePhoto(createdTask.task.id, photo, sessionToken);
+        }
       }
 
       setCreateModalVisible(false);
       setDraftTask(createDefaultDraft(selectedDate));
+      setDraftReferencePhotos([]);
       setEditingTaskId(null);
       setEditorMode("create");
       await refreshData();
@@ -1120,6 +1145,7 @@ export default function App() {
     editorMode,
     editingTaskId,
     refreshData,
+    draftReferencePhotos,
     selectedGroup,
     selectedDate,
     sessionToken,
@@ -1380,6 +1406,32 @@ export default function App() {
       mimeType: asset.mimeType ?? "image/jpeg",
     };
   }, [chooseImageSource]);
+
+  const handleDraftReferencePhotoPick = useCallback(async () => {
+    try {
+      if (draftReferencePhotos.length >= 2) {
+        throw new Error("PHOTO_LIMIT_REACHED");
+      }
+
+      const asset = await pickImageAsset();
+      if (!asset) {
+        return;
+      }
+
+      setDraftReferencePhotos((current) =>
+        current.concat({
+          ...asset,
+          previewUri: asset.uri,
+        }),
+      );
+    } catch (error) {
+      setErrorMessage(formatApiError(error));
+    }
+  }, [draftReferencePhotos.length, pickImageAsset]);
+
+  const handleDraftReferencePhotoDelete = useCallback((index: number) => {
+    setDraftReferencePhotos((current) => current.filter((_, photoIndex) => photoIndex !== index));
+  }, []);
 
   const handleSubmitJoinRequest = useCallback(async () => {
     if (!inviteDraft.rawInput.trim() || !inviteDraft.requestedName.trim()) {
@@ -1783,7 +1835,7 @@ export default function App() {
               <Text style={styles.eyebrow}>TASK BOARD</Text>
               <Text style={styles.heroTitle}>{formatTaskDateLabel(selectedDate)}</Text>
               <Text style={styles.heroSubtitle}>
-                {selectedGroup?.name ?? "個人タスク"}
+                {selectedGroup?.name ?? "グループ未選択"}
               </Text>
             </View>
             <Pressable style={styles.fabButton} onPress={openCreateModal}>
@@ -1796,10 +1848,10 @@ export default function App() {
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.scopeRow}
           >
-            {[{ id: "personal" as GroupScopeId, name: "個人" }, ...(appState?.groups ?? []).map((group) => ({
+            {((appState?.groups ?? []).map((group) => ({
               id: group.id as GroupScopeId,
               name: group.name,
-            }))].map((scope) => (
+            }))).map((scope) => (
               <Pressable
                 key={scope.id}
                 style={[
@@ -1916,10 +1968,9 @@ export default function App() {
                 <View style={styles.taskHeader}>
                   <View style={styles.taskTitleWrap}>
                     <Text style={styles.taskTitle}>{taskTitle(task)}</Text>
-                    <Text style={styles.taskMeta}>
-                      {task.scheduled_time ? `${task.scheduled_time} / ` : ""}
-                      {groupName(appState?.groups ?? [], task.group_id)}
-                    </Text>
+                    {task.scheduled_time ? (
+                      <Text style={styles.taskMeta}>{task.scheduled_time}</Text>
+                    ) : null}
                     {task.recurrence ? (
                       <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
                     ) : null}
@@ -2225,10 +2276,9 @@ export default function App() {
                       <Text style={styles.rangeTaskStatus}>{statusLabel(task.status)}</Text>
                     </View>
                     <Text style={styles.rangeTaskTitle}>{taskTitle(task)}</Text>
-                    <Text style={styles.rangeTaskMeta}>
-                      {task.scheduled_time ? `${task.scheduled_time} / ` : ""}
-                      {groupName(appState?.groups ?? [], task.group_id)}
-                    </Text>
+                    {task.scheduled_time ? (
+                      <Text style={styles.rangeTaskMeta}>{task.scheduled_time}</Text>
+                    ) : null}
                     {task.recurrence ? (
                       <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
                     ) : null}
@@ -2263,10 +2313,10 @@ export default function App() {
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.scopeRow}
               >
-                {[{ id: "personal" as GroupScopeId, name: "個人" }, ...(appState?.groups ?? []).map((group) => ({
+                {((appState?.groups ?? []).map((group) => ({
                   id: group.id as GroupScopeId,
                   name: group.name,
-                }))].map((scope) => (
+                }))).map((scope) => (
                   <Pressable
                     key={scope.id}
                     style={[
@@ -2475,7 +2525,7 @@ export default function App() {
               <Text style={styles.modalMeta}>
                 {editorMode === "edit"
                   ? "内容を更新します"
-                  : `追加先: ${selectedGroup ? `${selectedGroup.name} に共有` : "個人タスク"}`}
+                  : `追加先: ${selectedGroup ? `${selectedGroup.name}` : "グループ未選択"}`}
               </Text>
 
               {editorMode === "create" ? (
@@ -2529,6 +2579,45 @@ export default function App() {
                   multiline
                 />
               </View>
+
+              {editorMode === "create" ? (
+                <View style={styles.formSection}>
+                  <View style={styles.photoSectionHeader}>
+                    <Text style={styles.fieldLabel}>説明画像</Text>
+                    {draftReferencePhotos.length < 2 ? (
+                      <Pressable style={styles.smallOutlineButton} onPress={() => void handleDraftReferencePhotoPick()}>
+                        <Text style={styles.smallOutlineButtonText}>追加</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  {draftReferencePhotos.length ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewStrip}>
+                      {draftReferencePhotos.map((photo, index) => (
+                        <View key={`${photo.name}-${index}`} style={styles.photoCard}>
+                          <Pressable onPress={() => setPhotoViewer({ uri: photo.previewUri, label: photo.name })}>
+                            {/* eslint-disable-next-line jsx-a11y/alt-text */}
+                            <Image
+                              source={{ uri: photo.previewUri }}
+                              style={styles.previewImage}
+                              resizeMode="cover"
+                            />
+                          </Pressable>
+                          <View style={styles.photoActionRow}>
+                            <Pressable
+                              style={styles.photoActionButton}
+                              onPress={() => handleDraftReferencePhotoDelete(index)}
+                            >
+                              <Text style={styles.photoActionText}>削除</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <Text style={styles.emptyText}>登録時に説明画像を 2 枚まで添付できます。</Text>
+                  )}
+                </View>
+              ) : null}
 
               <View style={styles.formRow}>
                 <View style={styles.formColumn}>

@@ -333,7 +333,7 @@ export async function createTask(payload: CreateTaskPayload, sessionToken: strin
     body: JSON.stringify(payload),
   });
 
-  return readJson<{ ok: boolean }>(response);
+  return readJson<{ ok: boolean; task: MobileTaskRecord }>(response);
 }
 
 export async function updateTask(
