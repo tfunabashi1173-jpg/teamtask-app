@@ -84,6 +84,10 @@ type DraftTask = {
 };
 
 type EditorMode = "create" | "edit";
+type RangeDraft = {
+  startDate: string;
+  endDate: string;
+};
 
 function createRedirectUri() {
   return `${APP_SCHEME}://auth/callback`;
@@ -176,6 +180,28 @@ function shiftDate(value: string, amount: number) {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + amount);
   return date.toISOString().slice(0, 10);
+}
+
+function recurrenceSummary(task: MobileTaskRecord) {
+  if (!task.recurrence) {
+    return null;
+  }
+
+  if (task.recurrence.frequency === "daily") {
+    return `${task.recurrence.interval_value}日ごと`;
+  }
+
+  if (task.recurrence.frequency === "weekly") {
+    const labels =
+      task.recurrence.days_of_week
+        ?.map((day) => WEEKDAYS.find((entry) => entry.value === day)?.label)
+        .filter(Boolean)
+        .join(" ")
+        ?? "";
+    return `毎週 ${labels}`.trim();
+  }
+
+  return `毎月 ${task.recurrence.day_of_month ?? 1}日`;
 }
 
 function compareTaskOrder(left: MobileTaskRecord, right: MobileTaskRecord) {
@@ -332,6 +358,11 @@ export default function App() {
   const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
   const [photoViewer, setPhotoViewer] = useState<{ uri: string; label: string } | null>(null);
   const [uploadingPhotoKey, setUploadingPhotoKey] = useState<string | null>(null);
+  const [listModalVisible, setListModalVisible] = useState(false);
+  const [rangeDraft, setRangeDraft] = useState<RangeDraft>({
+    startDate: buildTodayLabel(),
+    endDate: shiftDate(buildTodayLabel(), 30),
+  });
   const appStateRef = useRef(AppState.currentState);
 
   const loadBackendVersion = useCallback(async () => {
@@ -531,11 +562,38 @@ export default function App() {
     return logsExpanded ? appState.logs : appState.logs.slice(0, 1);
   }, [appState?.logs, logsExpanded]);
 
+  const rangeTasks = useMemo(() => {
+    if (!appState) {
+      return [];
+    }
+
+    return appState.tasks
+      .filter(
+        (task) =>
+          task.scheduled_date >= rangeDraft.startDate && task.scheduled_date <= rangeDraft.endDate,
+      )
+      .sort((left, right) => {
+        const dateDiff = left.scheduled_date.localeCompare(right.scheduled_date);
+        if (dateDiff !== 0) {
+          return dateDiff;
+        }
+        return compareTaskOrder(left, right);
+      });
+  }, [appState, rangeDraft.endDate, rangeDraft.startDate]);
+
   const openCreateModal = useCallback(() => {
     setDraftTask(createDefaultDraft(selectedDate));
     setEditorMode("create");
     setEditingTaskId(null);
     setCreateModalVisible(true);
+  }, [selectedDate]);
+
+  const openListModal = useCallback(() => {
+    setRangeDraft({
+      startDate: selectedDate,
+      endDate: shiftDate(selectedDate, 30),
+    });
+    setListModalVisible(true);
   }, [selectedDate]);
 
   const openEditModal = useCallback((task: MobileTaskRecord) => {
@@ -988,6 +1046,10 @@ export default function App() {
               <Text style={styles.dateSwitchText}>翌日</Text>
             </Pressable>
           </View>
+
+          <Pressable style={styles.listLaunchButton} onPress={openListModal}>
+            <Text style={styles.listLaunchButtonText}>期間一覧</Text>
+          </Pressable>
         </View>
 
         {errorMessage ? (
@@ -1020,6 +1082,9 @@ export default function App() {
                       {task.scheduled_time ? `${task.scheduled_time} / ` : ""}
                       {groupName(appState?.groups ?? [], task.group_id)}
                     </Text>
+                    {task.recurrence ? (
+                      <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
+                    ) : null}
                   </View>
                   <View style={styles.taskBadgeWrap}>
                     <Text style={styles.statusChip}>{statusLabel(task.status)}</Text>
@@ -1109,6 +1174,9 @@ export default function App() {
                   {selectedTask.scheduled_time ? `${selectedTask.scheduled_time} / ` : ""}
                   {statusLabel(selectedTask.status)}
                 </Text>
+                {selectedTask.recurrence ? (
+                  <Text style={styles.modalMeta}>{recurrenceSummary(selectedTask)}</Text>
+                ) : null}
                 {selectedTask.description ? (
                   <Text style={styles.modalDescription}>{selectedTask.description}</Text>
                 ) : null}
@@ -1289,6 +1357,80 @@ export default function App() {
               />
             ) : null}
           </View>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={listModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setListModalVisible(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setListModalVisible(false)}>
+          <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <Text style={styles.modalTitle}>期間タスク一覧</Text>
+            <Text style={styles.modalMeta}>既定は選択日から 1 か月です。</Text>
+
+            <View style={styles.formRow}>
+              <View style={styles.formColumn}>
+                <Text style={styles.fieldLabel}>開始日</Text>
+                <TextInput
+                  value={rangeDraft.startDate}
+                  onChangeText={(startDate) => setRangeDraft((current) => ({ ...current, startDate }))}
+                  placeholder="2026-04-15"
+                  placeholderTextColor="#A59C91"
+                  style={styles.textInput}
+                  autoCapitalize="none"
+                />
+              </View>
+              <View style={styles.formColumn}>
+                <Text style={styles.fieldLabel}>終了日</Text>
+                <TextInput
+                  value={rangeDraft.endDate}
+                  onChangeText={(endDate) => setRangeDraft((current) => ({ ...current, endDate }))}
+                  placeholder="2026-05-15"
+                  placeholderTextColor="#A59C91"
+                  style={styles.textInput}
+                  autoCapitalize="none"
+                />
+              </View>
+            </View>
+
+            <ScrollView style={styles.rangeList} contentContainerStyle={styles.rangeListContent}>
+              {rangeTasks.length ? (
+                rangeTasks.map((task) => (
+                  <Pressable
+                    key={task.id}
+                    style={styles.rangeTaskCard}
+                    onPress={() => {
+                      setListModalVisible(false);
+                      setSelectedDate(task.scheduled_date);
+                      setActiveTaskId(task.id);
+                    }}
+                  >
+                    <View style={styles.rangeTaskHeader}>
+                      <Text style={styles.rangeTaskDate}>{formatTaskDateLabel(task.scheduled_date)}</Text>
+                      <Text style={styles.rangeTaskStatus}>{statusLabel(task.status)}</Text>
+                    </View>
+                    <Text style={styles.rangeTaskTitle}>{taskTitle(task)}</Text>
+                    <Text style={styles.rangeTaskMeta}>
+                      {task.scheduled_time ? `${task.scheduled_time} / ` : ""}
+                      {groupName(appState?.groups ?? [], task.group_id)}
+                    </Text>
+                    {task.recurrence ? (
+                      <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
+                    ) : null}
+                  </Pressable>
+                ))
+              ) : (
+                <Text style={styles.emptyText}>指定期間のタスクはありません。</Text>
+              )}
+            </ScrollView>
+
+            <Pressable style={styles.closeButton} onPress={() => setListModalVisible(false)}>
+              <Text style={styles.closeButtonText}>閉じる</Text>
+            </Pressable>
+          </Pressable>
         </Pressable>
       </Modal>
 
@@ -1715,6 +1857,21 @@ const styles = StyleSheet.create({
   dateSwitchTextActive: {
     color: "#FFFFFF",
   },
+  listLaunchButton: {
+    minHeight: 46,
+    borderRadius: 16,
+    backgroundColor: "#F3EEE4",
+    borderWidth: 1,
+    borderColor: BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+  listLaunchButtonText: {
+    color: TEXT,
+    fontSize: 14,
+    fontWeight: "700",
+  },
   fabButton: {
     width: 52,
     height: 52,
@@ -1824,6 +1981,10 @@ const styles = StyleSheet.create({
     color: MUTED,
     fontSize: 13,
   },
+  taskSubMeta: {
+    color: MUTED,
+    fontSize: 12,
+  },
   taskBadgeWrap: {
     alignItems: "flex-end",
     gap: 6,
@@ -1925,6 +2086,46 @@ const styles = StyleSheet.create({
   },
   largeModalCard: {
     maxHeight: "86%",
+  },
+  rangeList: {
+    marginTop: 14,
+    maxHeight: 420,
+  },
+  rangeListContent: {
+    gap: 10,
+    paddingBottom: 8,
+  },
+  rangeTaskCard: {
+    borderRadius: 18,
+    backgroundColor: "#F5F2EA",
+    padding: 14,
+    gap: 6,
+  },
+  rangeTaskHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  },
+  rangeTaskDate: {
+    color: TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  rangeTaskStatus: {
+    color: MUTED,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  rangeTaskTitle: {
+    color: TEXT,
+    fontSize: 16,
+    fontWeight: "700",
+    lineHeight: 22,
+  },
+  rangeTaskMeta: {
+    color: MUTED,
+    fontSize: 12,
   },
   modalTitle: {
     color: TEXT,
