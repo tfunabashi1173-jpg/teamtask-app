@@ -138,6 +138,7 @@ type GroupDraft = {
 type DraftReferencePhoto = UploadableImage & {
   previewUri: string;
 };
+type TimePickerTarget = "hour" | "minute" | null;
 
 function requestAgeLabel(value: string) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -524,6 +525,32 @@ function TaskPreviewImage({
   );
 }
 
+function ModalSwipeHandle({
+  onClose,
+}: {
+  onClose: () => void;
+}) {
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          Math.abs(gestureState.dy) > 12 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderRelease: (_, gestureState) => {
+          if (Math.abs(gestureState.dy) > 48) {
+            onClose();
+          }
+        },
+      }),
+    [onClose],
+  );
+
+  return (
+    <View style={styles.modalHandleWrap} {...panResponder.panHandlers}>
+      <View style={styles.modalHandle} />
+    </View>
+  );
+}
+
 function localAppMetadata() {
   const version = Constants.expoConfig?.version ?? "0.0.0";
   const commitSha =
@@ -663,6 +690,7 @@ export default function App() {
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [schedulingTestNotification, setSchedulingTestNotification] = useState(false);
   const [notificationTimeDraft, setNotificationTimeDraft] = useState("08:00");
+  const [timePickerTarget, setTimePickerTarget] = useState<TimePickerTarget>(null);
   const [isOnline, setIsOnline] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
@@ -1497,6 +1525,11 @@ export default function App() {
     [notificationTimeDraft],
   );
 
+  const timePickerOptions = useMemo(
+    () => (timePickerTarget === "hour" ? HOURS : MINUTES),
+    [timePickerTarget],
+  );
+
   const handleLeaveCurrentGroup = useCallback(() => {
     if (!sessionToken || !selectedGroup?.id) {
       return;
@@ -2212,6 +2245,7 @@ export default function App() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setActiveTaskId(null)}>
           <Pressable style={styles.modalCard} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setActiveTaskId(null)} />
             {selectedTask ? (
               <>
                 <Text style={styles.modalTitle}>{taskTitle(selectedTask)}</Text>
@@ -2408,6 +2442,7 @@ export default function App() {
       >
         <Pressable style={styles.photoViewerBackdrop} onPress={() => setPhotoViewer(null)}>
           <Pressable style={styles.photoViewerCard} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setPhotoViewer(null)} />
             <Text style={styles.photoViewerLabel}>{photoViewer?.label ?? ""}</Text>
             {photoViewer ? (
               // eslint-disable-next-line jsx-a11y/alt-text
@@ -2432,6 +2467,7 @@ export default function App() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setListModalVisible(false)}>
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setListModalVisible(false)} />
             <Text style={styles.modalTitle}>期間タスク一覧</Text>
             <Text style={styles.modalMeta}>既定は選択日から 1 か月です。</Text>
 
@@ -2505,9 +2541,20 @@ export default function App() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setManagementModalVisible(false)}>
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setManagementModalVisible(false)} />
             <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.modalTitle}>グループ詳細</Text>
-              <Text style={styles.modalMeta}>{selectedGroup?.name ?? "個人タスク"}</Text>
+              <View style={styles.modalHeaderRow}>
+                <View style={styles.modalHeaderBody}>
+                  <Text style={styles.modalTitle}>グループ詳細</Text>
+                  <Text style={styles.modalMeta}>{selectedGroup?.name ?? "個人タスク"}</Text>
+                </View>
+                <Pressable
+                  style={styles.modalHeaderCloseButton}
+                  onPress={() => setManagementModalVisible(false)}
+                >
+                  <Text style={styles.modalHeaderCloseText}>閉じる</Text>
+                </Pressable>
+              </View>
 
               <ScrollView
                 horizontal
@@ -2549,66 +2596,24 @@ export default function App() {
                 <>
                   <View style={styles.formSection}>
                     <Text style={styles.fieldLabel}>朝通知時刻</Text>
-                    <Text style={styles.modalMeta}>
-                      {notificationTimeDraft}
-                    </Text>
-                    <View style={styles.timeSelectorBlock}>
-                      <Text style={styles.timeSelectorLabel}>時</Text>
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.optionRow}
-                      >
-                        {HOURS.map((hour) => (
-                          <Pressable
-                            key={hour}
-                            style={[
-                              styles.choiceChip,
-                              notificationTimeParts.hour === hour && styles.choiceChipActive,
-                            ]}
-                            onPress={() => updateNotificationTimePart("hour", hour)}
-                          >
-                            <Text
-                              style={[
-                                styles.choiceChipText,
-                                notificationTimeParts.hour === hour && styles.choiceChipTextActive,
-                              ]}
-                            >
-                              {hour}
-                            </Text>
-                          </Pressable>
-                        ))}
-                      </ScrollView>
-                    </View>
-                    <View style={styles.timeSelectorBlock}>
-                      <Text style={styles.timeSelectorLabel}>分</Text>
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.optionRow}
-                      >
-                        {MINUTES.map((minute) => (
-                          <Pressable
-                            key={minute}
-                            style={[
-                              styles.choiceChip,
-                              notificationTimeParts.minute === minute && styles.choiceChipActive,
-                            ]}
-                            onPress={() => updateNotificationTimePart("minute", minute)}
-                          >
-                            <Text
-                              style={[
-                                styles.choiceChipText,
-                                notificationTimeParts.minute === minute &&
-                                  styles.choiceChipTextActive,
-                              ]}
-                            >
-                              {minute}
-                            </Text>
-                          </Pressable>
-                        ))}
-                      </ScrollView>
-                    </View>
+                    <Pressable
+                      style={styles.timePickerTrigger}
+                      onPress={() => setTimePickerTarget("hour")}
+                    >
+                      <Text style={styles.timePickerTriggerLabel}>時</Text>
+                      <Text style={styles.timePickerTriggerValue}>
+                        {notificationTimeParts.hour}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.timePickerTrigger}
+                      onPress={() => setTimePickerTarget("minute")}
+                    >
+                      <Text style={styles.timePickerTriggerLabel}>分</Text>
+                      <Text style={styles.timePickerTriggerValue}>
+                        {notificationTimeParts.minute}
+                      </Text>
+                    </Pressable>
                     <View style={styles.formRow}>
                       <View style={styles.formColumn}>
                         <Pressable
@@ -2769,6 +2774,7 @@ export default function App() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setCreateModalVisible(false)}>
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setCreateModalVisible(false)} />
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={styles.modalTitle}>
                 {editorMode === "edit" ? "タスクを編集" : "タスクを追加"}
@@ -3092,6 +3098,7 @@ export default function App() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setJoinModalVisible(false)}>
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setJoinModalVisible(false)} />
             <Text style={styles.modalTitle}>招待リンクで参加</Text>
             <Text style={styles.modalMeta}>
               招待 URL 全体または末尾の招待コードを入力してください。
@@ -3143,6 +3150,55 @@ export default function App() {
                 )}
               </Pressable>
             </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={Boolean(timePickerTarget)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTimePickerTarget(null)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setTimePickerTarget(null)}>
+          <Pressable style={[styles.modalCard, styles.timePickerModalCard]} onPress={() => null}>
+            <ModalSwipeHandle onClose={() => setTimePickerTarget(null)} />
+            <Text style={styles.modalTitle}>
+              {timePickerTarget === "hour" ? "時を選択" : "分を選択"}
+            </Text>
+            <ScrollView style={styles.timePickerList} contentContainerStyle={styles.rangeListContent}>
+              {timePickerOptions.map((value) => {
+                const active =
+                  timePickerTarget === "hour"
+                    ? notificationTimeParts.hour === value
+                    : notificationTimeParts.minute === value;
+
+                return (
+                  <Pressable
+                    key={value}
+                    style={[styles.timePickerOption, active && styles.timePickerOptionActive]}
+                    onPress={() => {
+                      if (timePickerTarget) {
+                        updateNotificationTimePart(timePickerTarget, value);
+                      }
+                      setTimePickerTarget(null);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.timePickerOptionText,
+                        active && styles.timePickerOptionTextActive,
+                      ]}
+                    >
+                      {value}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <Pressable style={styles.closeButton} onPress={() => setTimePickerTarget(null)}>
+              <Text style={styles.closeButtonText}>閉じる</Text>
+            </Pressable>
           </Pressable>
         </Pressable>
       </Modal>
@@ -3641,8 +3697,23 @@ const styles = StyleSheet.create({
     padding: 22,
     gap: 12,
   },
+  modalHandleWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingTop: 2,
+    paddingBottom: 6,
+  },
+  modalHandle: {
+    width: 56,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: "#D7D0C3",
+  },
   largeModalCard: {
     maxHeight: "86%",
+  },
+  timePickerModalCard: {
+    maxHeight: "72%",
   },
   rangeList: {
     marginTop: 14,
@@ -3684,6 +3755,77 @@ const styles = StyleSheet.create({
     color: MUTED,
     fontSize: 12,
   },
+  timePickerTrigger: {
+    minHeight: 54,
+    borderRadius: 18,
+    backgroundColor: "#F5F2EA",
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  timePickerTriggerLabel: {
+    color: MUTED,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  timePickerTriggerValue: {
+    color: TEXT,
+    fontSize: 22,
+    fontWeight: "800",
+  },
+  timePickerList: {
+    marginTop: 8,
+    maxHeight: 360,
+  },
+  timePickerOption: {
+    minHeight: 50,
+    borderRadius: 16,
+    backgroundColor: "#F5F2EA",
+    borderWidth: 1,
+    borderColor: BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  timePickerOptionActive: {
+    backgroundColor: "#E5F1EA",
+    borderColor: BRAND,
+  },
+  timePickerOptionText: {
+    color: TEXT,
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  timePickerOptionTextActive: {
+    color: BRAND,
+  },
+  modalHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 4,
+  },
+  modalHeaderBody: {
+    flex: 1,
+    gap: 4,
+  },
+  modalHeaderCloseButton: {
+    minHeight: 38,
+    borderRadius: 14,
+    backgroundColor: "#EEE8DC",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  modalHeaderCloseText: {
+    color: TEXT,
+    fontSize: 13,
+    fontWeight: "700",
+  },
   modalTitle: {
     color: TEXT,
     fontSize: 26,
@@ -3701,14 +3843,6 @@ const styles = StyleSheet.create({
   formColumn: {
     flex: 1,
     gap: 8,
-  },
-  timeSelectorBlock: {
-    gap: 8,
-  },
-  timeSelectorLabel: {
-    color: MUTED,
-    fontSize: 12,
-    fontWeight: "700",
   },
   fieldLabel: {
     color: TEXT,
