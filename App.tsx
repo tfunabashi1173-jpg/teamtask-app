@@ -1463,6 +1463,17 @@ export default function App() {
     setDraftReferencePhotos((current) => current.filter((_, photoIndex) => photoIndex !== index));
   }, []);
 
+  const openPhotoPreview = useCallback(
+    (uri: string, label: string, options?: { closeTaskDetail?: boolean }) => {
+      if (options?.closeTaskDetail) {
+        setActiveTaskId(null);
+      }
+
+      setPhotoViewer({ uri, label });
+    },
+    [],
+  );
+
   const handleSubmitJoinRequest = useCallback(async () => {
     if (!inviteDraft.rawInput.trim() || !inviteDraft.requestedName.trim()) {
       setErrorMessage("招待リンクと表示名を入力してください。");
@@ -2092,9 +2103,8 @@ export default function App() {
                           sessionToken={sessionToken ?? ""}
                           busy={uploadingPhotoKey === `reference:${selectedTask.id}:${photo.id}`}
                           onPress={() =>
-                            setPhotoViewer({
-                              uri: createBackendUrl(photo.preview_url ?? ""),
-                              label: photo.file_name,
+                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name, {
+                              closeTaskDetail: true,
                             })
                           }
                         />
@@ -2183,12 +2193,11 @@ export default function App() {
                           sessionToken={sessionToken ?? ""}
                           busy={uploadingPhotoKey === `done:${selectedTask.id}:${photo.id}`}
                           onPress={() =>
-                            setPhotoViewer({
-                              uri: createBackendUrl(photo.preview_url ?? ""),
-                                label: photo.file_name,
-                              })
-                            }
-                          />
+                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name, {
+                              closeTaskDetail: true,
+                            })
+                          }
+                        />
                           <View style={styles.photoActionRow}>
                             <Pressable
                               style={styles.photoActionButton}
@@ -2251,7 +2260,13 @@ export default function App() {
                   <Text style={styles.deleteButtonText}>削除</Text>
                 </Pressable>
 
-                <Pressable style={styles.closeButton} onPress={() => setActiveTaskId(null)}>
+                <Pressable
+                  style={styles.closeButton}
+                  onPress={() => {
+                    setPhotoViewer(null);
+                    setActiveTaskId(null);
+                  }}
+                >
                   <Text style={styles.closeButtonText}>閉じる</Text>
                 </Pressable>
               </>
@@ -2267,7 +2282,7 @@ export default function App() {
         onRequestClose={() => setPhotoViewer(null)}
       >
         <Pressable style={styles.photoViewerBackdrop} onPress={() => setPhotoViewer(null)}>
-          <View style={styles.photoViewerCard}>
+          <Pressable style={styles.photoViewerCard} onPress={() => null}>
             <Text style={styles.photoViewerLabel}>{photoViewer?.label ?? ""}</Text>
             {photoViewer ? (
               // eslint-disable-next-line jsx-a11y/alt-text
@@ -2280,7 +2295,7 @@ export default function App() {
                 resizeMode="contain"
               />
             ) : null}
-          </View>
+          </Pressable>
         </Pressable>
       </Modal>
 
@@ -2655,7 +2670,7 @@ export default function App() {
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewStrip}>
                       {draftReferencePhotos.map((photo, index) => (
                         <View key={`${photo.name}-${index}`} style={styles.photoCard}>
-                          <Pressable onPress={() => setPhotoViewer({ uri: photo.previewUri, label: photo.name })}>
+                          <Pressable onPress={() => openPhotoPreview(photo.previewUri, photo.name)}>
                             {/* eslint-disable-next-line jsx-a11y/alt-text */}
                             <Image
                               source={{ uri: photo.previewUri }}
