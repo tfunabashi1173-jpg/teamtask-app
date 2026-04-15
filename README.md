@@ -2,6 +2,11 @@
 
 Expo ベースの React Native 版です。既存の Web / PWA バックエンドと同じ Supabase / API を使いながら、ネイティブアプリとして実装を進めます。
 
+## backend-copy について
+
+`backend-copy/` に、既存 PWA で使用している API / 認証 / 通知 / SQL をコピー保存しています。
+これは参照用の複製であり、元の PWA ファイルは削除しません。
+
 ## 初回セットアップ
 
 1. `.env.example` を `.env.local` にコピー
