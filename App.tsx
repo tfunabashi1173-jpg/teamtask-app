@@ -431,17 +431,19 @@ function TaskPreviewImage({
   photo,
   sessionToken,
   onPress,
+  busy,
 }: {
   photo: TaskPhotoRecord;
   sessionToken: string;
   onPress?: () => void;
+  busy?: boolean;
 }) {
   if (!photo.preview_url) {
     return null;
   }
 
   return (
-    <Pressable onPress={onPress}>
+    <Pressable onPress={onPress} disabled={busy} style={styles.previewImageWrap}>
       {/* eslint-disable-next-line jsx-a11y/alt-text */}
       <Image
         source={{
@@ -451,6 +453,12 @@ function TaskPreviewImage({
         style={styles.previewImage}
         resizeMode="cover"
       />
+      {busy ? (
+        <View style={styles.previewImageOverlay}>
+          <ActivityIndicator color="#FFFFFF" />
+          <Text style={styles.previewImageOverlayText}>アップロード中...</Text>
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -601,6 +609,9 @@ export default function App() {
   >("undetermined");
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
+  const previousSelectedDateRef = useRef(buildTodayLabel());
+  const dateTitleSlide = useRef(new Animated.Value(0)).current;
+  const [animatedDateLabel, setAnimatedDateLabel] = useState(buildTodayLabel());
   const localVersion = useMemo(localAppMetadata, []);
 
   const loadBackendVersion = useCallback(async () => {
@@ -681,6 +692,25 @@ export default function App() {
       await ImagePicker.requestCameraPermissionsAsync();
     })();
   }, [loadState]);
+
+  useEffect(() => {
+    const previousDate = previousSelectedDateRef.current;
+    if (previousDate === selectedDate) {
+      return;
+    }
+
+    const direction = selectedDate > previousDate ? 1 : -1;
+    previousSelectedDateRef.current = selectedDate;
+    setAnimatedDateLabel(selectedDate);
+    dateTitleSlide.setValue(26 * direction);
+
+    Animated.spring(dateTitleSlide, {
+      toValue: 0,
+      useNativeDriver: true,
+      bounciness: 6,
+      speed: 18,
+    }).start();
+  }, [dateTitleSlide, selectedDate]);
 
   const refreshData = useCallback(async () => {
     if (!sessionToken) {
@@ -1833,7 +1863,16 @@ export default function App() {
           <View style={styles.heroTopRow}>
             <View style={styles.heroTitleWrap}>
               <Text style={styles.eyebrow}>TASK BOARD</Text>
-              <Text style={styles.heroTitle}>{formatTaskDateLabel(selectedDate)}</Text>
+              <Animated.Text
+                style={[
+                  styles.heroTitle,
+                  {
+                    transform: [{ translateX: dateTitleSlide }],
+                  },
+                ]}
+              >
+                {formatTaskDateLabel(animatedDateLabel)}
+              </Animated.Text>
               <Text style={styles.heroSubtitle}>
                 {selectedGroup?.name ?? "グループ未選択"}
               </Text>
@@ -2051,6 +2090,7 @@ export default function App() {
                         <TaskPreviewImage
                           photo={photo}
                           sessionToken={sessionToken ?? ""}
+                          busy={uploadingPhotoKey === `reference:${selectedTask.id}:${photo.id}`}
                           onPress={() =>
                             setPhotoViewer({
                               uri: createBackendUrl(photo.preview_url ?? ""),
@@ -2086,12 +2126,22 @@ export default function App() {
                     <Text style={styles.fieldLabel}>説明用画像</Text>
                     {(selectedTask.reference_photos?.length ?? 0) < 2 ? (
                       <Pressable
-                        style={styles.smallOutlineButton}
+                        style={[
+                          styles.smallOutlineButton,
+                          uploadingPhotoKey === `reference:${selectedTask.id}:new` &&
+                            styles.smallOutlineButtonBusy,
+                        ]}
                         onPress={() => void handleReferencePhotoUpload(selectedTask.id)}
+                        disabled={uploadingPhotoKey === `reference:${selectedTask.id}:new`}
                       >
-                        <Text style={styles.smallOutlineButtonText}>
-                          {uploadingPhotoKey === `reference:${selectedTask.id}:new` ? "..." : "追加"}
-                        </Text>
+                        {uploadingPhotoKey === `reference:${selectedTask.id}:new` ? (
+                          <View style={styles.inlineBusyRow}>
+                            <ActivityIndicator size="small" color={TEXT} />
+                            <Text style={styles.smallOutlineButtonText}>追加中</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.smallOutlineButtonText}>追加</Text>
+                        )}
                       </Pressable>
                     ) : null}
                   </View>
@@ -2105,12 +2155,22 @@ export default function App() {
                     <Text style={styles.fieldLabel}>完了写真</Text>
                     {selectedTask.status === "done" && (selectedTask.photos?.length ?? 0) < 3 ? (
                       <Pressable
-                        style={styles.smallOutlineButton}
+                        style={[
+                          styles.smallOutlineButton,
+                          uploadingPhotoKey === `done:${selectedTask.id}:new` &&
+                            styles.smallOutlineButtonBusy,
+                        ]}
                         onPress={() => void handleTaskPhotoUpload(selectedTask.id)}
+                        disabled={uploadingPhotoKey === `done:${selectedTask.id}:new`}
                       >
-                        <Text style={styles.smallOutlineButtonText}>
-                          {uploadingPhotoKey === `done:${selectedTask.id}:new` ? "..." : "追加"}
-                        </Text>
+                        {uploadingPhotoKey === `done:${selectedTask.id}:new` ? (
+                          <View style={styles.inlineBusyRow}>
+                            <ActivityIndicator size="small" color={TEXT} />
+                            <Text style={styles.smallOutlineButtonText}>追加中</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.smallOutlineButtonText}>追加</Text>
+                        )}
                       </Pressable>
                     ) : null}
                   </View>
@@ -2118,12 +2178,13 @@ export default function App() {
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewStrip}>
                       {selectedTask.photos.map((photo) => (
                         <View key={photo.id} style={styles.photoCard}>
-                          <TaskPreviewImage
-                            photo={photo}
-                            sessionToken={sessionToken ?? ""}
-                            onPress={() =>
-                              setPhotoViewer({
-                                uri: createBackendUrl(photo.preview_url ?? ""),
+                        <TaskPreviewImage
+                          photo={photo}
+                          sessionToken={sessionToken ?? ""}
+                          busy={uploadingPhotoKey === `done:${selectedTask.id}:${photo.id}`}
+                          onPress={() =>
+                            setPhotoViewer({
+                              uri: createBackendUrl(photo.preview_url ?? ""),
                                 label: photo.file_name,
                               })
                             }
@@ -3590,6 +3651,14 @@ const styles = StyleSheet.create({
   previewStrip: {
     marginTop: 4,
   },
+  previewImageWrap: {
+    width: 104,
+    height: 104,
+    borderRadius: 18,
+    marginRight: 10,
+    overflow: "hidden",
+    backgroundColor: "#ECE7DD",
+  },
   photoSection: {
     gap: 8,
     marginTop: 6,
@@ -3604,11 +3673,21 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   previewImage: {
-    width: 104,
-    height: 104,
-    borderRadius: 18,
-    marginRight: 10,
+    width: "100%",
+    height: "100%",
     backgroundColor: "#ECE7DD",
+  },
+  previewImageOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(31, 28, 25, 0.48)",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  previewImageOverlayText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "700",
   },
   photoActionRow: {
     flexDirection: "row",
@@ -3637,10 +3716,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  smallOutlineButtonBusy: {
+    opacity: 0.85,
+  },
   smallOutlineButtonText: {
     color: TEXT,
     fontSize: 12,
     fontWeight: "700",
+  },
+  inlineBusyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   actionGrid: {
     flexDirection: "row",
