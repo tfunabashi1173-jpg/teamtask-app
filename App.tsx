@@ -80,6 +80,7 @@ Notifications.setNotificationHandler({
 
 const SESSION_TOKEN_KEY = "team-task-mobile-session-token";
 const EXPO_PUSH_TOKEN_KEY = "team-task-mobile-expo-push-token";
+const MORNING_LOCAL_NOTIFICATION_KIND = "morning-task-summary";
 const APP_SCHEME = "teamtaskmobile";
 const BRAND = "#1F6B52";
 const SURFACE = "#F5F2EA";
@@ -289,6 +290,52 @@ function shiftDate(value: string, amount: number) {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + amount);
   return formatLocalDate(date);
+}
+
+function parseNotificationTime(value: string) {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  return { hour, minute };
+}
+
+function buildMorningNotificationSummary(tasks: MobileTaskRecord[], dateLabel: string) {
+  const targetTasks = tasks
+    .filter(
+      (task) =>
+        task.scheduled_date === dateLabel &&
+        task.deleted_at === null &&
+        task.status !== "done" &&
+        task.status !== "skipped",
+    )
+    .sort(compareTaskOrder);
+
+  if (targetTasks.length === 0) {
+    return {
+      title: `${formatTaskDateLabel(dateLabel)}のタスク`,
+      body: "未完了タスクはありません。",
+    };
+  }
+
+  const preview = targetTasks
+    .slice(0, 3)
+    .map((task) => task.title)
+    .join(" / ");
+  const restCount = targetTasks.length - Math.min(targetTasks.length, 3);
+
+  return {
+    title: `${formatTaskDateLabel(dateLabel)}のタスク ${targetTasks.length}件`,
+    body: restCount > 0 ? `${preview} / ほか${restCount}件` : preview,
+  };
 }
 
 function recurrenceSummary(task: MobileTaskRecord) {
@@ -614,6 +661,19 @@ export default function App() {
   const [animatedDateLabel, setAnimatedDateLabel] = useState(buildTodayLabel());
   const localVersion = useMemo(localAppMetadata, []);
 
+  const clearMorningLocalNotifications = useCallback(async () => {
+    const requests = await Notifications.getAllScheduledNotificationsAsync();
+    const targets = requests.filter(
+      (request) => request.content.data?.kind === MORNING_LOCAL_NOTIFICATION_KIND,
+    );
+
+    await Promise.all(
+      targets.map((request) =>
+        Notifications.cancelScheduledNotificationAsync(request.identifier),
+      ),
+    );
+  }, []);
+
   const loadBackendVersion = useCallback(async () => {
     try {
       const version = await fetchBackendVersion();
@@ -682,6 +742,63 @@ export default function App() {
     })();
   }, []);
 
+  const syncMorningLocalNotification = useCallback(async () => {
+    await clearMorningLocalNotifications();
+
+    if (loadState !== "ready") {
+      return;
+    }
+
+    const notificationTime = appState?.workspace?.notification_time?.slice(0, 5) ?? "";
+    const parsedTime = parseNotificationTime(notificationTime);
+    if (!parsedTime) {
+      return;
+    }
+
+    const settings = await Notifications.getPermissionsAsync();
+    setNotificationPermission(settings.status);
+
+    if (settings.status !== "granted") {
+      return;
+    }
+
+    const firstTrigger = new Date();
+    firstTrigger.setHours(parsedTime.hour, parsedTime.minute, 0, 0);
+
+    if (firstTrigger.getTime() <= Date.now()) {
+      firstTrigger.setDate(firstTrigger.getDate() + 1);
+    }
+
+    const scheduleTargets = Array.from({ length: 7 }, (_, index) => {
+      const triggerDate = new Date(firstTrigger);
+      triggerDate.setDate(firstTrigger.getDate() + index);
+      return triggerDate;
+    });
+
+    await Promise.all(
+      scheduleTargets.map((triggerDate) => {
+        const targetDateLabel = formatLocalDate(triggerDate);
+        const summary = buildMorningNotificationSummary(appState?.tasks ?? [], targetDateLabel);
+
+        return Notifications.scheduleNotificationAsync({
+          content: {
+            title: summary.title,
+            body: summary.body,
+            sound: "default",
+            data: {
+              kind: MORNING_LOCAL_NOTIFICATION_KIND,
+              date: targetDateLabel,
+            },
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: triggerDate,
+          },
+        });
+      }),
+    );
+  }, [appState?.tasks, appState?.workspace?.notification_time, clearMorningLocalNotifications, loadState]);
+
   useEffect(() => {
     if (loadState !== "ready") {
       return;
@@ -692,6 +809,10 @@ export default function App() {
       await ImagePicker.requestCameraPermissionsAsync();
     })();
   }, [loadState]);
+
+  useEffect(() => {
+    void syncMorningLocalNotification();
+  }, [syncMorningLocalNotification]);
 
   useEffect(() => {
     const previousDate = previousSelectedDateRef.current;
@@ -850,12 +971,13 @@ export default function App() {
     }
     await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
     await SecureStore.deleteItemAsync(EXPO_PUSH_TOKEN_KEY);
+    await clearMorningLocalNotifications();
     setSessionToken(null);
     setAppState(null);
     setActiveTaskId(null);
     setLoadState("logged_out");
     setExpoPushToken(null);
-  }, []);
+  }, [clearMorningLocalNotifications, sessionToken]);
 
   const registerNativePush = useCallback(async () => {
     if (!sessionToken || !Device.isDevice) {
@@ -1463,16 +1585,9 @@ export default function App() {
     setDraftReferencePhotos((current) => current.filter((_, photoIndex) => photoIndex !== index));
   }, []);
 
-  const openPhotoPreview = useCallback(
-    (uri: string, label: string, options?: { closeTaskDetail?: boolean }) => {
-      if (options?.closeTaskDetail) {
-        setActiveTaskId(null);
-      }
-
-      setPhotoViewer({ uri, label });
-    },
-    [],
-  );
+  const openPhotoPreview = useCallback((uri: string, label: string) => {
+    setPhotoViewer({ uri, label });
+  }, []);
 
   const handleSubmitJoinRequest = useCallback(async () => {
     if (!inviteDraft.rawInput.trim() || !inviteDraft.requestedName.trim()) {
@@ -1884,9 +1999,6 @@ export default function App() {
               >
                 {formatTaskDateLabel(animatedDateLabel)}
               </Animated.Text>
-              <Text style={styles.heroSubtitle}>
-                {selectedGroup?.name ?? "グループ未選択"}
-              </Text>
             </View>
             <Pressable style={styles.fabButton} onPress={openCreateModal}>
               <Text style={styles.fabButtonText}>＋</Text>
@@ -1983,27 +2095,9 @@ export default function App() {
           </View>
         ) : null}
 
-        <View style={styles.syncCard}>
-          <Text style={styles.syncText}>{isOnline ? "オンライン" : "オフライン"}</Text>
-          <Text style={styles.syncMeta}>{syncLabel(lastSyncedAt)}</Text>
-          <Text style={styles.syncMeta}>
-            通知権限: {notificationPermission === "granted" ? "許可" : notificationPermission === "denied" ? "拒否" : "未確認"}
-          </Text>
-        </View>
-
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>タスク</Text>
-            <View style={styles.headerActionRow}>
-              <Pressable onPress={openManagementModal}>
-                <Text style={styles.linkText}>
-                  {isAdmin && pendingRequests.length > 0 ? `管理 ${pendingRequests.length}` : "管理"}
-                </Text>
-              </Pressable>
-              <Pressable onPress={() => void handleLogout()}>
-                <Text style={styles.linkText}>ログアウト</Text>
-              </Pressable>
-            </View>
           </View>
 
           {visibleTasks.length === 0 ? (
@@ -2066,6 +2160,16 @@ export default function App() {
         </View>
 
         <View style={styles.versionFooter}>
+          <View style={styles.footerActionRow}>
+            <Pressable style={styles.footerActionButton} onPress={openManagementModal}>
+              <Text style={styles.footerActionText}>
+                {isAdmin && pendingRequests.length > 0 ? `管理 ${pendingRequests.length}` : "管理"}
+              </Text>
+            </Pressable>
+            <Pressable style={styles.footerActionButton} onPress={() => void handleLogout()}>
+              <Text style={styles.footerActionText}>ログアウト</Text>
+            </Pressable>
+          </View>
           <Text style={styles.versionFooterText}>
             App {localVersion.appVersion} ({localVersion.commitSha}) / Backend {backendVersion?.appVersion ?? "-"} ({backendVersion?.commitSha ?? "-"})
           </Text>
@@ -2103,9 +2207,7 @@ export default function App() {
                           sessionToken={sessionToken ?? ""}
                           busy={uploadingPhotoKey === `reference:${selectedTask.id}:${photo.id}`}
                           onPress={() =>
-                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name, {
-                              closeTaskDetail: true,
-                            })
+                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name)
                           }
                         />
                         <View style={styles.photoActionRow}>
@@ -2193,9 +2295,7 @@ export default function App() {
                           sessionToken={sessionToken ?? ""}
                           busy={uploadingPhotoKey === `done:${selectedTask.id}:${photo.id}`}
                           onPress={() =>
-                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name, {
-                              closeTaskDetail: true,
-                            })
+                            openPhotoPreview(createBackendUrl(photo.preview_url ?? ""), photo.file_name)
                           }
                         />
                           <View style={styles.photoActionRow}>
@@ -2262,10 +2362,7 @@ export default function App() {
 
                 <Pressable
                   style={styles.closeButton}
-                  onPress={() => {
-                    setPhotoViewer(null);
-                    setActiveTaskId(null);
-                  }}
+                  onPress={() => setActiveTaskId(null)}
                 >
                   <Text style={styles.closeButtonText}>閉じる</Text>
                 </Pressable>
@@ -3083,10 +3180,6 @@ const styles = StyleSheet.create({
     fontSize: 36,
     fontWeight: "800",
   },
-  heroSubtitle: {
-    color: MUTED,
-    fontSize: 15,
-  },
   scopeRow: {
     gap: 8,
     paddingTop: 2,
@@ -3170,16 +3263,17 @@ const styles = StyleSheet.create({
   },
   summaryGrid: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
+    gap: 8,
     marginTop: 6,
   },
   summaryCard: {
-    width: "47.5%",
-    minHeight: 88,
-    borderRadius: 20,
+    flex: 1,
+    minWidth: 0,
+    minHeight: 82,
+    borderRadius: 18,
     backgroundColor: "#F0EEE8",
-    padding: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 12,
     justifyContent: "space-between",
   },
   summaryWarm: {
@@ -3190,12 +3284,12 @@ const styles = StyleSheet.create({
   },
   summaryLabel: {
     color: MUTED,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "700",
   },
   summaryValue: {
     color: TEXT,
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: "800",
   },
   inlineErrorCard: {
@@ -3210,21 +3304,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
-  syncCard: {
-    borderRadius: 18,
-    backgroundColor: "#EEE9DE",
-    padding: 14,
-    gap: 4,
-  },
-  syncText: {
-    color: TEXT,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  syncMeta: {
-    color: MUTED,
-    fontSize: 12,
-  },
   sectionCard: {
     borderRadius: 28,
     backgroundColor: CARD,
@@ -3237,11 +3316,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-  },
-  headerActionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
   },
   sectionTitle: {
     color: TEXT,
@@ -3446,10 +3520,33 @@ const styles = StyleSheet.create({
   },
   versionFooter: {
     alignItems: "center",
+    gap: 12,
+  },
+  footerActionRow: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+  },
+  footerActionButton: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: CARD,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+  },
+  footerActionText: {
+    color: BRAND,
+    fontSize: 14,
+    fontWeight: "700",
   },
   versionFooterText: {
     color: MUTED,
     fontSize: 12,
+    textAlign: "center",
   },
   modalBackdrop: {
     flex: 1,
