@@ -6,7 +6,6 @@ import {
   AppState,
   Image,
   Modal,
-  PanResponder,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -145,6 +144,23 @@ type DraftReferencePhoto = UploadableImage & {
 };
 type TimePickerTarget = "hour" | "minute" | null;
 
+type SwipeGestureBindings = {
+  onTouchStart: (event: {
+    nativeEvent: {
+      pageX: number;
+      pageY: number;
+    };
+  }) => void;
+  onTouchMove: (event: {
+    nativeEvent: {
+      pageX: number;
+      pageY: number;
+    };
+  }) => void;
+  onTouchEnd: () => void;
+  onTouchCancel: () => void;
+};
+
 function requestAgeLabel(value: string) {
   return new Intl.DateTimeFormat("ja-JP", {
     month: "numeric",
@@ -186,6 +202,69 @@ function createDefaultDraft(baseDate: string): DraftTask {
     recurrenceDayOfMonth: "1",
     copiedFromTaskId: null,
   };
+}
+
+function useSwipeReveal(
+  translateX: Animated.Value,
+  options: {
+    maxReveal: number;
+    opened: boolean;
+    animateTo: (value: number) => void;
+  },
+): SwipeGestureBindings {
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  const lastDx = useRef(0);
+  const claimed = useRef(false);
+
+  return useMemo(
+    () => ({
+      onTouchStart: (event) => {
+        touchStart.current = {
+          x: event.nativeEvent.pageX,
+          y: event.nativeEvent.pageY,
+        };
+        lastDx.current = 0;
+        claimed.current = false;
+      },
+      onTouchMove: (event) => {
+        if (!touchStart.current) {
+          return;
+        }
+
+        const dx = event.nativeEvent.pageX - touchStart.current.x;
+        const dy = event.nativeEvent.pageY - touchStart.current.y;
+
+        if (!claimed.current) {
+          if (Math.abs(dx) <= 12 || Math.abs(dy) >= 10) {
+            return;
+          }
+          claimed.current = true;
+        }
+
+        lastDx.current = dx;
+        const nextValue = options.opened ? -options.maxReveal + dx : dx;
+        translateX.setValue(Math.max(-options.maxReveal, Math.min(0, nextValue)));
+      },
+      onTouchEnd: () => {
+        if (!touchStart.current) {
+          return;
+        }
+
+        const shouldOpen = options.opened ? lastDx.current < 24 : lastDx.current < -24;
+        options.animateTo(shouldOpen ? -options.maxReveal : 0);
+        touchStart.current = null;
+        claimed.current = false;
+        lastDx.current = 0;
+      },
+      onTouchCancel: () => {
+        options.animateTo(options.opened ? -options.maxReveal : 0);
+        touchStart.current = null;
+        claimed.current = false;
+        lastDx.current = 0;
+      },
+    }),
+    [options, translateX],
+  );
 }
 
 function createDraftFromTask(task: MobileTaskRecord): DraftTask {
@@ -654,21 +733,11 @@ function SwipeDismissLogItem({
     [translateX],
   );
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gesture) =>
-        Math.abs(gesture.dx) > 12 && Math.abs(gesture.dy) < 10,
-      onPanResponderMove: (_, gesture) => {
-        const nextValue = opened ? -88 + gesture.dx : gesture.dx;
-        translateX.setValue(Math.max(-88, Math.min(0, nextValue)));
-      },
-      onPanResponderRelease: (_, gesture) => {
-        const shouldOpen = opened ? gesture.dx < 24 : gesture.dx < -24;
-        animateTo(shouldOpen ? -88 : 0);
-      },
-      onPanResponderTerminate: () => animateTo(opened ? -88 : 0),
-    }),
-  ).current;
+  const swipeBindings = useSwipeReveal(translateX, {
+    maxReveal: 88,
+    opened,
+    animateTo,
+  });
 
   return (
     <View style={styles.logSwipeFrame}>
@@ -690,7 +759,7 @@ function SwipeDismissLogItem({
       </View>
       <Animated.View
         style={[styles.logSwipeCard, { transform: [{ translateX }] }]}
-        {...panResponder.panHandlers}
+        {...swipeBindings}
       >
         <View style={styles.logBubble}>
           {log.actor?.line_picture_url ? (
@@ -747,21 +816,11 @@ function SwipeDeleteRangeTaskItem({
     [translateX],
   );
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gesture) =>
-        Math.abs(gesture.dx) > 12 && Math.abs(gesture.dy) < 10,
-      onPanResponderMove: (_, gesture) => {
-        const nextValue = opened ? -92 + gesture.dx : gesture.dx;
-        translateX.setValue(Math.max(-92, Math.min(0, nextValue)));
-      },
-      onPanResponderRelease: (_, gesture) => {
-        const shouldOpen = opened ? gesture.dx < 24 : gesture.dx < -24;
-        animateTo(shouldOpen ? -92 : 0);
-      },
-      onPanResponderTerminate: () => animateTo(opened ? -92 : 0),
-    }),
-  ).current;
+  const swipeBindings = useSwipeReveal(translateX, {
+    maxReveal: 92,
+    opened,
+    animateTo,
+  });
 
   return (
     <View style={styles.rangeTaskSwipeFrame}>
@@ -779,7 +838,7 @@ function SwipeDeleteRangeTaskItem({
       </View>
       <Animated.View
         style={[styles.rangeTaskSwipeCard, { transform: [{ translateX }] }]}
-        {...panResponder.panHandlers}
+        {...swipeBindings}
       >
         <Pressable style={styles.rangeTaskCard} onPress={onOpen}>
           <View style={styles.rangeTaskHeader}>
