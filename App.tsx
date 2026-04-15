@@ -99,6 +99,11 @@ const WEEKDAYS = [
 ];
 const HOURS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
 const MINUTES = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, "0"));
+const TASK_TIME_SLOTS = [
+  { value: "morning", label: "午前中" },
+  { value: "afternoon", label: "午後中" },
+  { value: "anytime", label: "当日中" },
+] as const;
 
 type LoadState = "booting" | "logged_out" | "ready";
 type DraftTask = {
@@ -106,7 +111,7 @@ type DraftTask = {
   description: string;
   priority: "urgent" | "high" | "medium" | "low";
   scheduledDate: string;
-  scheduledTime: string;
+  timeSlot: "morning" | "afternoon" | "anytime";
   recurrenceEnabled: boolean;
   recurrenceFrequency: RecurrenceFrequency;
   recurrenceInterval: string;
@@ -172,7 +177,7 @@ function createDefaultDraft(baseDate: string): DraftTask {
     description: "",
     priority: "medium",
     scheduledDate: baseDate,
-    scheduledTime: "",
+    timeSlot: "anytime",
     recurrenceEnabled: false,
     recurrenceFrequency: "weekly",
     recurrenceInterval: "1",
@@ -189,7 +194,7 @@ function createDraftFromTask(task: MobileTaskRecord): DraftTask {
     description: task.description ?? "",
     priority: task.priority,
     scheduledDate: task.scheduled_date,
-    scheduledTime: task.scheduled_time ?? "",
+    timeSlot: timeSlotFromScheduledTime(task.scheduled_time),
     recurrenceEnabled: Boolean(task.recurrence),
     recurrenceFrequency: task.recurrence?.frequency ?? "weekly",
     recurrenceInterval: String(task.recurrence?.interval_value ?? 1),
@@ -293,6 +298,45 @@ function shiftDate(value: string, amount: number) {
   const date = new Date(`${value}T00:00:00`);
   date.setDate(date.getDate() + amount);
   return formatLocalDate(date);
+}
+
+function timeSlotFromScheduledTime(value: string | null | undefined): DraftTask["timeSlot"] {
+  switch (value) {
+    case "09:00":
+      return "morning";
+    case "13:00":
+      return "afternoon";
+    default:
+      return "anytime";
+  }
+}
+
+function scheduledTimeFromSlot(value: DraftTask["timeSlot"]) {
+  switch (value) {
+    case "morning":
+      return "09:00";
+    case "afternoon":
+      return "13:00";
+    default:
+      return "18:00";
+  }
+}
+
+function timeSlotLabelFromScheduledTime(value: string | null | undefined) {
+  return TASK_TIME_SLOTS.find(
+    (slot) => slot.value === timeSlotFromScheduledTime(value),
+  )?.label ?? "当日中";
+}
+
+function timeSlotOrder(value: string | null | undefined) {
+  switch (timeSlotFromScheduledTime(value)) {
+    case "morning":
+      return 0;
+    case "afternoon":
+      return 1;
+    default:
+      return 2;
+  }
 }
 
 function parseNotificationTime(value: string) {
@@ -401,9 +445,12 @@ function compareTaskOrder(left: MobileTaskRecord, right: MobileTaskRecord) {
     return rankDiff;
   }
 
-  const leftTime = left.scheduled_time ?? "99:99";
-  const rightTime = right.scheduled_time ?? "99:99";
-  return leftTime.localeCompare(rightTime);
+  const slotDiff = timeSlotOrder(left.scheduled_time) - timeSlotOrder(right.scheduled_time);
+  if (slotDiff !== 0) {
+    return slotDiff;
+  }
+
+  return left.title.localeCompare(right.title, "ja");
 }
 
 function statusLabel(status: MobileTaskRecord["status"]) {
@@ -539,26 +586,31 @@ function ModalSwipeHandle({
 }: {
   onClose: () => void;
 }) {
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onStartShouldSetPanResponderCapture: () => true,
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          Math.abs(gestureState.dy) > 12 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
-        onMoveShouldSetPanResponderCapture: (_, gestureState) =>
-          Math.abs(gestureState.dy) > 6 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
-        onPanResponderRelease: (_, gestureState) => {
-          if (Math.abs(gestureState.dy) > 48) {
-            onClose();
-          }
-        },
-      }),
-    [onClose],
-  );
+  const touchStartYRef = useRef<number | null>(null);
 
   return (
-    <View style={styles.modalHandleWrap} {...panResponder.panHandlers}>
+    <View
+      style={styles.modalHandleWrap}
+      onTouchStart={(event) => {
+        touchStartYRef.current = event.nativeEvent.pageY;
+      }}
+      onTouchEnd={(event) => {
+        const startY = touchStartYRef.current;
+        touchStartYRef.current = null;
+
+        if (startY === null) {
+          return;
+        }
+
+        const deltaY = event.nativeEvent.pageY - startY;
+        if (Math.abs(deltaY) > 48) {
+          onClose();
+        }
+      }}
+      onTouchCancel={() => {
+        touchStartYRef.current = null;
+      }}
+    >
       <View style={styles.modalHandle} />
     </View>
   );
@@ -626,7 +678,14 @@ function SwipeDismissLogItem({
           onPress={onDismiss}
           disabled={busy}
         >
-          <Text style={styles.logDeleteButtonText}>{busy ? "..." : "削除"}</Text>
+          {busy ? (
+            <View style={styles.logDeleteBusyRow}>
+              <ActivityIndicator size="small" color="#8E3B2D" />
+              <Text style={styles.logDeleteButtonText}>削除中</Text>
+            </View>
+          ) : (
+            <Text style={styles.logDeleteButtonText}>削除</Text>
+          )}
         </Pressable>
       </View>
       <Animated.View
@@ -661,6 +720,85 @@ function SwipeDismissLogItem({
   );
 }
 
+function SwipeDeleteRangeTaskItem({
+  task,
+  busy,
+  onOpen,
+  onDelete,
+}: {
+  task: MobileTaskRecord;
+  busy: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const [opened, setOpened] = useState(false);
+
+  const animateTo = useCallback(
+    (value: number) => {
+      Animated.spring(translateX, {
+        toValue: value,
+        useNativeDriver: true,
+        bounciness: 0,
+      }).start(() => {
+        setOpened(value !== 0);
+      });
+    },
+    [translateX],
+  );
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gesture) =>
+        Math.abs(gesture.dx) > 12 && Math.abs(gesture.dy) < 10,
+      onPanResponderMove: (_, gesture) => {
+        const nextValue = opened ? -92 + gesture.dx : gesture.dx;
+        translateX.setValue(Math.max(-92, Math.min(0, nextValue)));
+      },
+      onPanResponderRelease: (_, gesture) => {
+        const shouldOpen = opened ? gesture.dx < 24 : gesture.dx < -24;
+        animateTo(shouldOpen ? -92 : 0);
+      },
+      onPanResponderTerminate: () => animateTo(opened ? -92 : 0),
+    }),
+  ).current;
+
+  return (
+    <View style={styles.rangeTaskSwipeFrame}>
+      <View style={styles.rangeTaskDeleteSlot}>
+        <Pressable style={styles.rangeTaskDeleteButton} onPress={onDelete} disabled={busy}>
+          {busy ? (
+            <View style={styles.logDeleteBusyRow}>
+              <ActivityIndicator size="small" color="#8E3B2D" />
+              <Text style={styles.logDeleteButtonText}>削除中</Text>
+            </View>
+          ) : (
+            <Text style={styles.logDeleteButtonText}>削除</Text>
+          )}
+        </Pressable>
+      </View>
+      <Animated.View
+        style={[styles.rangeTaskSwipeCard, { transform: [{ translateX }] }]}
+        {...panResponder.panHandlers}
+      >
+        <Pressable style={styles.rangeTaskCard} onPress={onOpen}>
+          <View style={styles.rangeTaskHeader}>
+            <Text style={styles.rangeTaskDate}>{formatTaskDateLabel(task.scheduled_date)}</Text>
+            <Text style={styles.rangeTaskStatus}>{statusLabel(task.status)}</Text>
+          </View>
+          <Text style={styles.rangeTaskTitle}>{taskTitle(task)}</Text>
+          <Text style={styles.rangeTaskMeta}>
+            {timeSlotLabelFromScheduledTime(task.scheduled_time)}
+          </Text>
+          {task.recurrence ? (
+            <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
+          ) : null}
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
+
 export default function App() {
   const [loadState, setLoadState] = useState<LoadState>("booting");
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -681,6 +819,7 @@ export default function App() {
   const [selectedGroupScope, setSelectedGroupScope] = useState<GroupScopeId>("");
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
+  const [deletingRangeTaskId, setDeletingRangeTaskId] = useState<string | null>(null);
   const [photoViewer, setPhotoViewer] = useState<{ uri: string; label: string } | null>(null);
   const [uploadingPhotoKey, setUploadingPhotoKey] = useState<string | null>(null);
   const [draftReferencePhotos, setDraftReferencePhotos] = useState<DraftReferencePhoto[]>([]);
@@ -1250,7 +1389,7 @@ export default function App() {
         title: sourceTask.title,
         description: sourceTask.description ?? "",
         priority: sourceTask.priority,
-        scheduledTime: sourceTask.scheduled_time ?? "",
+        timeSlot: timeSlotFromScheduledTime(sourceTask.scheduled_time),
         recurrenceEnabled: Boolean(sourceTask.recurrence),
         recurrenceFrequency: sourceTask.recurrence?.frequency ?? "weekly",
         recurrenceInterval: String(sourceTask.recurrence?.interval_value ?? 1),
@@ -1317,7 +1456,7 @@ export default function App() {
             description: draftTask.description.trim(),
             priority: draftTask.priority,
             scheduledDate: draftTask.scheduledDate,
-            scheduledTime: draftTask.scheduledTime || null,
+            scheduledTime: scheduledTimeFromSlot(draftTask.timeSlot),
             recurrence: recurrencePayload,
           },
           sessionToken,
@@ -1329,7 +1468,7 @@ export default function App() {
           description: draftTask.description.trim(),
           priority: draftTask.priority,
           scheduledDate: draftTask.scheduledDate,
-          scheduledTime: draftTask.scheduledTime || null,
+          scheduledTime: scheduledTimeFromSlot(draftTask.timeSlot),
           visibilityType: "group",
           groupId: selectedGroup.id,
           recurrence: recurrencePayload,
@@ -1366,7 +1505,7 @@ export default function App() {
   ]);
 
   const handleDeleteTask = useCallback(
-    (taskId: string) => {
+    (taskId: string, options?: { preserveDetail?: boolean; fromRangeList?: boolean }) => {
       if (!sessionToken) {
         return;
       }
@@ -1378,16 +1517,26 @@ export default function App() {
           style: "destructive",
           onPress: () => {
             void (async () => {
-              setActingTaskId(taskId);
+              if (options?.fromRangeList) {
+                setDeletingRangeTaskId(taskId);
+              } else {
+                setActingTaskId(taskId);
+              }
               setErrorMessage(null);
               try {
                 await deleteTask(taskId, sessionToken);
-                setActiveTaskId(null);
+                if (!options?.preserveDetail) {
+                  setActiveTaskId(null);
+                }
                 await refreshData();
               } catch (error) {
                 setErrorMessage(formatApiError(error));
               } finally {
-                setActingTaskId(null);
+                if (options?.fromRangeList) {
+                  setDeletingRangeTaskId(null);
+                } else {
+                  setActingTaskId(null);
+                }
               }
             })();
           },
@@ -2189,9 +2338,9 @@ export default function App() {
                 <View style={styles.taskHeader}>
                   <View style={styles.taskTitleWrap}>
                     <Text style={styles.taskTitle}>{taskTitle(task)}</Text>
-                    {task.scheduled_time ? (
-                      <Text style={styles.taskMeta}>{task.scheduled_time}</Text>
-                    ) : null}
+                    <Text style={styles.taskMeta}>
+                      {timeSlotLabelFromScheduledTime(task.scheduled_time)}
+                    </Text>
                     {task.recurrence ? (
                       <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
                     ) : null}
@@ -2266,7 +2415,7 @@ export default function App() {
               <>
                 <Text style={styles.modalTitle}>{taskTitle(selectedTask)}</Text>
                 <Text style={styles.modalMeta}>
-                  {selectedTask.scheduled_time ? `${selectedTask.scheduled_time} / ` : ""}
+                  {`${timeSlotLabelFromScheduledTime(selectedTask.scheduled_time)} / `}
                   {statusLabel(selectedTask.status)}
                 </Text>
                 {selectedTask.recurrence ? (
@@ -2515,27 +2664,19 @@ export default function App() {
             <ScrollView style={styles.rangeList} contentContainerStyle={styles.rangeListContent}>
               {rangeTasks.length ? (
                 rangeTasks.map((task) => (
-                  <Pressable
+                  <SwipeDeleteRangeTaskItem
                     key={task.id}
-                    style={styles.rangeTaskCard}
-                    onPress={() => {
+                    task={task}
+                    busy={deletingRangeTaskId === task.id}
+                    onOpen={() => {
                       setListModalVisible(false);
                       setSelectedDate(task.scheduled_date);
                       setActiveTaskId(task.id);
                     }}
-                  >
-                    <View style={styles.rangeTaskHeader}>
-                      <Text style={styles.rangeTaskDate}>{formatTaskDateLabel(task.scheduled_date)}</Text>
-                      <Text style={styles.rangeTaskStatus}>{statusLabel(task.status)}</Text>
-                    </View>
-                    <Text style={styles.rangeTaskTitle}>{taskTitle(task)}</Text>
-                    {task.scheduled_time ? (
-                      <Text style={styles.rangeTaskMeta}>{task.scheduled_time}</Text>
-                    ) : null}
-                    {task.recurrence ? (
-                      <Text style={styles.taskSubMeta}>{recurrenceSummary(task)}</Text>
-                    ) : null}
-                  </Pressable>
+                    onDelete={() =>
+                      handleDeleteTask(task.id, { preserveDetail: true, fromRangeList: true })
+                    }
+                  />
                 ))
               ) : (
                 <Text style={styles.emptyText}>指定期間のタスクはありません。</Text>
@@ -2803,28 +2944,60 @@ export default function App() {
 
               {editorMode === "create" ? (
                 <View style={styles.formSection}>
-                  <Text style={styles.fieldLabel}>既存タスクをコピー</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                    {copyableTasks.map((task) => (
+                  <View style={styles.photoSectionHeader}>
+                    <Text style={styles.fieldLabel}>既存タスクをコピー</Text>
+                    {draftTask.copiedFromTaskId ? (
                       <Pressable
-                        key={task.id}
-                        style={[
-                          styles.copyTaskChip,
-                          draftTask.copiedFromTaskId === task.id && styles.copyTaskChipActive,
-                        ]}
-                        onPress={() => applyCopiedTask(task.id)}
+                        style={styles.smallOutlineButton}
+                        onPress={() =>
+                          setDraftTask((current) => ({
+                            ...current,
+                            copiedFromTaskId: null,
+                          }))
+                        }
                       >
-                        <Text
-                          style={[
-                            styles.copyTaskChipText,
-                            draftTask.copiedFromTaskId === task.id && styles.copyTaskChipTextActive,
-                          ]}
-                        >
-                          {task.title}
-                        </Text>
+                        <Text style={styles.smallOutlineButtonText}>選択解除</Text>
                       </Pressable>
-                    ))}
-                  </ScrollView>
+                    ) : null}
+                  </View>
+                  {copyableTasks.length ? (
+                    <ScrollView
+                      style={styles.copyTaskList}
+                      nestedScrollEnabled
+                      showsVerticalScrollIndicator={false}
+                    >
+                      {copyableTasks.map((task) => (
+                        <Pressable
+                          key={task.id}
+                          style={[
+                            styles.copyTaskListItem,
+                            draftTask.copiedFromTaskId === task.id && styles.copyTaskListItemActive,
+                          ]}
+                          onPress={() => applyCopiedTask(task.id)}
+                        >
+                          <View style={styles.copyTaskListBody}>
+                            <Text
+                              style={[
+                                styles.copyTaskListTitle,
+                                draftTask.copiedFromTaskId === task.id &&
+                                  styles.copyTaskListTitleActive,
+                              ]}
+                            >
+                              {task.title}
+                            </Text>
+                            <Text style={styles.copyTaskListMeta}>
+                              {timeSlotLabelFromScheduledTime(task.scheduled_time)}
+                            </Text>
+                          </View>
+                          {draftTask.copiedFromTaskId === task.id ? (
+                            <Text style={styles.copyTaskSelectedMark}>選択中</Text>
+                          ) : null}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  ) : (
+                    <Text style={styles.emptyText}>コピー元に使える既存タスクはありません。</Text>
+                  )}
                 </View>
               ) : null}
 
@@ -2907,17 +3080,30 @@ export default function App() {
                   />
                 </View>
                 <View style={styles.formColumn}>
-                  <Text style={styles.fieldLabel}>時刻</Text>
-                  <TextInput
-                    value={draftTask.scheduledTime}
-                    onChangeText={(scheduledTime) =>
-                      setDraftTask((current) => ({ ...current, scheduledTime }))
-                    }
-                    placeholder="09:00"
-                    placeholderTextColor="#A59C91"
-                    style={styles.textInput}
-                    autoCapitalize="none"
-                  />
+                  <Text style={styles.fieldLabel}>時間帯</Text>
+                  <View style={styles.optionRow}>
+                    {TASK_TIME_SLOTS.map((slot) => (
+                      <Pressable
+                        key={slot.value}
+                        style={[
+                          styles.choiceChip,
+                          draftTask.timeSlot === slot.value && styles.choiceChipActive,
+                        ]}
+                        onPress={() =>
+                          setDraftTask((current) => ({ ...current, timeSlot: slot.value }))
+                        }
+                      >
+                        <Text
+                          style={[
+                            styles.choiceChipText,
+                            draftTask.timeSlot === slot.value && styles.choiceChipTextActive,
+                          ]}
+                        >
+                          {slot.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                 </View>
               </View>
 
@@ -3623,6 +3809,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
   },
+  logDeleteBusyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
   logAvatar: {
     width: 42,
     height: 42,
@@ -3738,6 +3930,31 @@ const styles = StyleSheet.create({
   rangeListContent: {
     gap: 10,
     paddingBottom: 8,
+  },
+  rangeTaskSwipeFrame: {
+    overflow: "hidden",
+    borderRadius: 18,
+  },
+  rangeTaskSwipeCard: {
+    zIndex: 1,
+  },
+  rangeTaskDeleteSlot: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 96,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingRight: 6,
+  },
+  rangeTaskDeleteButton: {
+    width: 80,
+    height: "100%",
+    borderRadius: 18,
+    backgroundColor: "#EADCD7",
+    alignItems: "center",
+    justifyContent: "center",
   },
   rangeTaskCard: {
     borderRadius: 18,
@@ -3936,6 +4153,47 @@ const styles = StyleSheet.create({
   },
   copyTaskChipTextActive: {
     color: BRAND,
+  },
+  copyTaskList: {
+    maxHeight: 220,
+  },
+  copyTaskListItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderRadius: 16,
+    backgroundColor: "#F5F2EA",
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  copyTaskListItemActive: {
+    backgroundColor: "#E5F1EA",
+    borderColor: BRAND,
+  },
+  copyTaskListBody: {
+    flex: 1,
+    gap: 4,
+  },
+  copyTaskListTitle: {
+    color: TEXT,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  copyTaskListTitleActive: {
+    color: BRAND,
+  },
+  copyTaskListMeta: {
+    color: MUTED,
+    fontSize: 12,
+  },
+  copyTaskSelectedMark: {
+    color: BRAND,
+    fontSize: 12,
+    fontWeight: "700",
   },
   toggleRow: {
     flexDirection: "row",
