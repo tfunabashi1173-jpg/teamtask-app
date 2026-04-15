@@ -120,6 +120,22 @@ export type CreateTaskPayload = {
   };
 };
 
+export type UpdateTaskPayload = {
+  title?: string;
+  description?: string | null;
+  priority?: "urgent" | "high" | "medium" | "low";
+  scheduledDate?: string;
+  scheduledTime?: string | null;
+  recurrence?: {
+    enabled: boolean;
+    frequency?: RecurrenceFrequency;
+    interval?: number;
+    endDate?: string;
+    daysOfWeek?: number[];
+    dayOfMonth?: number | null;
+  };
+};
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -201,6 +217,48 @@ export async function createTask(payload: CreateTaskPayload, sessionToken: strin
       "Cache-Control": "no-store",
     },
     body: JSON.stringify(payload),
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function updateTask(
+  taskId: string,
+  payload: UpdateTaskPayload,
+  sessionToken: string,
+) {
+  const response = await fetch(createBackendUrl(`/api/tasks/${taskId}`), {
+    method: "PATCH",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function deleteTask(taskId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/tasks/${taskId}`), {
+    method: "DELETE",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
+  });
+
+  return readJson<{ ok: boolean }>(response);
+}
+
+export async function dismissLog(logId: string, sessionToken: string) {
+  const response = await fetch(createBackendUrl(`/api/logs/${logId}/dismiss`), {
+    method: "POST",
+    headers: {
+      ...createAuthHeaders(sessionToken),
+      "Cache-Control": "no-store",
+    },
   });
 
   return readJson<{ ok: boolean }>(response);

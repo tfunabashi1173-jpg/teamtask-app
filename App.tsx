@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   Image,
   Modal,
@@ -22,6 +23,8 @@ import {
   createAuthHeaders,
   createBackendUrl,
   createTask,
+  deleteTask,
+  dismissLog,
   exchangeMobileSession,
   fetchAppState,
   postTaskAction,
@@ -33,6 +36,7 @@ import {
   type RecurrenceFrequency,
   type TaskAction,
   type TaskPhotoRecord,
+  updateTask,
 } from "./src/lib/api";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -71,6 +75,8 @@ type DraftTask = {
   copiedFromTaskId: string | null;
 };
 
+type EditorMode = "create" | "edit";
+
 function createRedirectUri() {
   return `${APP_SCHEME}://auth/callback`;
 }
@@ -89,6 +95,23 @@ function createDefaultDraft(baseDate: string): DraftTask {
     recurrenceDaysOfWeek: [],
     recurrenceDayOfMonth: "1",
     copiedFromTaskId: null,
+  };
+}
+
+function createDraftFromTask(task: MobileTaskRecord): DraftTask {
+  return {
+    title: task.title,
+    description: task.description ?? "",
+    priority: task.priority,
+    scheduledDate: task.scheduled_date,
+    scheduledTime: task.scheduled_time ?? "",
+    recurrenceEnabled: Boolean(task.recurrence),
+    recurrenceFrequency: task.recurrence?.frequency ?? "weekly",
+    recurrenceInterval: String(task.recurrence?.interval_value ?? 1),
+    recurrenceEndDate: task.recurrence?.end_date ?? task.scheduled_date,
+    recurrenceDaysOfWeek: task.recurrence?.days_of_week ?? [],
+    recurrenceDayOfMonth: String(task.recurrence?.day_of_month ?? 1),
+    copiedFromTaskId: task.id,
   };
 }
 
@@ -131,6 +154,12 @@ function formatTaskDateLabel(value: string) {
 
 function buildTodayLabel() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function shiftDate(value: string, amount: number) {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + amount);
+  return date.toISOString().slice(0, 10);
 }
 
 function compareTaskOrder(left: MobileTaskRecord, right: MobileTaskRecord) {
@@ -275,7 +304,12 @@ export default function App() {
   const [actingTaskId, setActingTaskId] = useState<string | null>(null);
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(buildTodayLabel());
   const [draftTask, setDraftTask] = useState<DraftTask>(() => createDefaultDraft(buildTodayLabel()));
+  const [editorMode, setEditorMode] = useState<EditorMode>("create");
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [dismissingLogId, setDismissingLogId] = useState<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
 
   const loadBackendVersion = useCallback(async () => {
@@ -436,41 +470,58 @@ export default function App() {
   const today = useMemo(buildTodayLabel, []);
   const primaryGroup = useMemo(() => appState?.groups[0] ?? null, [appState?.groups]);
 
-  const todayTasks = useMemo(() => {
+  const visibleTasks = useMemo(() => {
     if (!appState) {
       return [];
     }
 
     return appState.tasks
-      .filter((task) => task.scheduled_date === today)
+      .filter((task) => task.scheduled_date === selectedDate)
       .sort(compareTaskOrder);
-  }, [appState, today]);
+  }, [appState, selectedDate]);
 
   const selectedTask = useMemo(
-    () => todayTasks.find((task) => task.id === activeTaskId) ?? null,
-    [activeTaskId, todayTasks],
+    () => visibleTasks.find((task) => task.id === activeTaskId) ?? null,
+    [activeTaskId, visibleTasks],
   );
 
   const summary = useMemo(() => {
     return {
-      pending: todayTasks.filter((task) => task.status === "pending").length,
-      inProgress: todayTasks.filter((task) => task.status === "in_progress").length,
-      awaitingConfirmation: todayTasks.filter(
+      pending: visibleTasks.filter((task) => task.status === "pending").length,
+      inProgress: visibleTasks.filter((task) => task.status === "in_progress").length,
+      awaitingConfirmation: visibleTasks.filter(
         (task) => task.status === "awaiting_confirmation",
       ).length,
-      done: todayTasks.filter((task) => task.status === "done").length,
+      done: visibleTasks.filter((task) => task.status === "done").length,
     };
-  }, [todayTasks]);
+  }, [visibleTasks]);
 
   const copyableTasks = useMemo(
     () => (appState?.tasks ?? []).slice().sort(compareTaskOrder).slice(0, 12),
     [appState?.tasks],
   );
 
+  const visibleLogs = useMemo(() => {
+    if (!appState?.logs?.length) {
+      return [];
+    }
+
+    return logsExpanded ? appState.logs : appState.logs.slice(0, 1);
+  }, [appState?.logs, logsExpanded]);
+
   const openCreateModal = useCallback(() => {
-    setDraftTask(createDefaultDraft(today));
+    setDraftTask(createDefaultDraft(selectedDate));
+    setEditorMode("create");
+    setEditingTaskId(null);
     setCreateModalVisible(true);
-  }, [today]);
+  }, [selectedDate]);
+
+  const openEditModal = useCallback((task: MobileTaskRecord) => {
+    setDraftTask(createDraftFromTask(task));
+    setEditorMode("edit");
+    setEditingTaskId(task.id);
+    setCreateModalVisible(true);
+  }, []);
 
   const applyCopiedTask = useCallback(
     (taskId: string) => {
@@ -520,45 +571,127 @@ export default function App() {
     const interval = Number(draftTask.recurrenceInterval || "1");
     const dayOfMonth = Number(draftTask.recurrenceDayOfMonth || "1");
 
-    const payload: CreateTaskPayload = {
-      workspaceId: appState.workspace.id,
-      title: normalizedTitle,
-      description: draftTask.description.trim(),
-      priority: draftTask.priority,
-      scheduledDate: draftTask.scheduledDate,
-      scheduledTime: draftTask.scheduledTime || null,
-      visibilityType: primaryGroup ? "group" : "personal",
-      groupId: primaryGroup?.id ?? null,
-      recurrence: {
-        enabled: draftTask.recurrenceEnabled,
-        frequency: draftTask.recurrenceEnabled ? draftTask.recurrenceFrequency : undefined,
-        interval: draftTask.recurrenceEnabled ? Math.max(1, interval || 1) : undefined,
-        endDate: draftTask.recurrenceEnabled ? draftTask.recurrenceEndDate : undefined,
-        daysOfWeek:
-          draftTask.recurrenceEnabled && draftTask.recurrenceFrequency === "weekly"
-            ? draftTask.recurrenceDaysOfWeek
-            : undefined,
-        dayOfMonth:
-          draftTask.recurrenceEnabled && draftTask.recurrenceFrequency === "monthly"
-            ? Math.min(31, Math.max(1, dayOfMonth || 1))
-            : null,
-      },
+    const recurrencePayload = {
+      enabled: draftTask.recurrenceEnabled,
+      frequency: draftTask.recurrenceEnabled ? draftTask.recurrenceFrequency : undefined,
+      interval: draftTask.recurrenceEnabled ? Math.max(1, interval || 1) : undefined,
+      endDate: draftTask.recurrenceEnabled ? draftTask.recurrenceEndDate : undefined,
+      daysOfWeek:
+        draftTask.recurrenceEnabled && draftTask.recurrenceFrequency === "weekly"
+          ? draftTask.recurrenceDaysOfWeek
+          : undefined,
+      dayOfMonth:
+        draftTask.recurrenceEnabled && draftTask.recurrenceFrequency === "monthly"
+          ? Math.min(31, Math.max(1, dayOfMonth || 1))
+          : null,
     };
 
     setSavingTask(true);
     setErrorMessage(null);
 
     try {
-      await createTask(payload, sessionToken);
+      if (editorMode === "edit" && editingTaskId) {
+        await updateTask(
+          editingTaskId,
+          {
+            title: normalizedTitle,
+            description: draftTask.description.trim(),
+            priority: draftTask.priority,
+            scheduledDate: draftTask.scheduledDate,
+            scheduledTime: draftTask.scheduledTime || null,
+            recurrence: recurrencePayload,
+          },
+          sessionToken,
+        );
+      } else {
+        const payload: CreateTaskPayload = {
+          workspaceId: appState.workspace.id,
+          title: normalizedTitle,
+          description: draftTask.description.trim(),
+          priority: draftTask.priority,
+          scheduledDate: draftTask.scheduledDate,
+          scheduledTime: draftTask.scheduledTime || null,
+          visibilityType: primaryGroup ? "group" : "personal",
+          groupId: primaryGroup?.id ?? null,
+          recurrence: recurrencePayload,
+        };
+
+        await createTask(payload, sessionToken);
+      }
+
       setCreateModalVisible(false);
-      setDraftTask(createDefaultDraft(today));
+      setDraftTask(createDefaultDraft(selectedDate));
+      setEditingTaskId(null);
+      setEditorMode("create");
       await refreshData();
     } catch (error) {
       setErrorMessage(formatApiError(error));
     } finally {
       setSavingTask(false);
     }
-  }, [appState?.workspace, draftTask, primaryGroup, refreshData, sessionToken, today]);
+  }, [
+    appState?.workspace,
+    draftTask,
+    editorMode,
+    editingTaskId,
+    primaryGroup,
+    refreshData,
+    selectedDate,
+    sessionToken,
+  ]);
+
+  const handleDeleteTask = useCallback(
+    (taskId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      Alert.alert("タスクを削除", "このタスクを削除します。元に戻せません。", [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setActingTaskId(taskId);
+              setErrorMessage(null);
+              try {
+                await deleteTask(taskId, sessionToken);
+                setActiveTaskId(null);
+                await refreshData();
+              } catch (error) {
+                setErrorMessage(formatApiError(error));
+              } finally {
+                setActingTaskId(null);
+              }
+            })();
+          },
+        },
+      ]);
+    },
+    [refreshData, sessionToken],
+  );
+
+  const handleDismissLog = useCallback(
+    async (logId: string) => {
+      if (!sessionToken) {
+        return;
+      }
+
+      setDismissingLogId(logId);
+      setErrorMessage(null);
+
+      try {
+        await dismissLog(logId, sessionToken);
+        await refreshData();
+      } catch (error) {
+        setErrorMessage(formatApiError(error));
+      } finally {
+        setDismissingLogId(null);
+      }
+    },
+    [refreshData, sessionToken],
+  );
 
   if (loadState === "booting") {
     return (
@@ -622,7 +755,7 @@ export default function App() {
           <View style={styles.heroTopRow}>
             <View style={styles.heroTitleWrap}>
               <Text style={styles.eyebrow}>TASK BOARD</Text>
-              <Text style={styles.heroTitle}>{formatTaskDateLabel(today)}</Text>
+              <Text style={styles.heroTitle}>{formatTaskDateLabel(selectedDate)}</Text>
               <Text style={styles.heroSubtitle}>
                 {primaryGroup?.name ?? appState?.workspace?.name ?? "ワークスペース未設定"}
               </Text>
@@ -650,6 +783,37 @@ export default function App() {
               <Text style={styles.summaryValue}>{summary.done}</Text>
             </View>
           </View>
+
+          <View style={styles.daySwitcherRow}>
+            <Pressable
+              style={styles.dateSwitchButton}
+              onPress={() => setSelectedDate((current) => shiftDate(current, -1))}
+            >
+              <Text style={styles.dateSwitchText}>前日</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.dateSwitchButton,
+                selectedDate === today && styles.dateSwitchButtonActive,
+              ]}
+              onPress={() => setSelectedDate(today)}
+            >
+              <Text
+                style={[
+                  styles.dateSwitchText,
+                  selectedDate === today && styles.dateSwitchTextActive,
+                ]}
+              >
+                本日
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.dateSwitchButton}
+              onPress={() => setSelectedDate((current) => shiftDate(current, 1))}
+            >
+              <Text style={styles.dateSwitchText}>翌日</Text>
+            </Pressable>
+          </View>
         </View>
 
         {errorMessage ? (
@@ -666,10 +830,10 @@ export default function App() {
             </Pressable>
           </View>
 
-          {todayTasks.length === 0 ? (
+          {visibleTasks.length === 0 ? (
             <Text style={styles.emptyText}>今日のタスクはありません。</Text>
           ) : (
-            todayTasks.map((task) => (
+            visibleTasks.map((task) => (
               <Pressable
                 key={task.id}
                 style={styles.taskCard}
@@ -685,6 +849,7 @@ export default function App() {
                   </View>
                   <View style={styles.taskBadgeWrap}>
                     <Text style={styles.statusChip}>{statusLabel(task.status)}</Text>
+                    <Text style={styles.priorityText}>{priorityLabel(task.priority)}</Text>
                   </View>
                 </View>
                 {task.description ? (
@@ -698,9 +863,18 @@ export default function App() {
         </View>
 
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>通知</Text>
-          {appState?.logs?.length ? (
-            appState.logs.slice(0, 5).map((log) => (
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>通知</Text>
+            {appState?.logs && appState.logs.length > 1 ? (
+              <Pressable onPress={() => setLogsExpanded((current) => !current)}>
+                <Text style={styles.linkText}>
+                  {logsExpanded ? "折りたたむ" : `過去 ${appState.logs.length - 1} 件`}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+          {visibleLogs.length ? (
+            visibleLogs.map((log) => (
               <View key={log.id} style={styles.logBubble}>
                 {log.actor?.line_picture_url ? (
                   // eslint-disable-next-line jsx-a11y/alt-text
@@ -713,7 +887,6 @@ export default function App() {
                   </View>
                 )}
                 <View style={styles.logBody}>
-                  <Text style={styles.logActor}>{log.actor?.display_name ?? "誰か"}</Text>
                   <Text style={styles.logText}>{logMessage(log)}</Text>
                   <Text style={styles.logTime}>
                     {new Intl.DateTimeFormat("ja-JP", {
@@ -724,6 +897,15 @@ export default function App() {
                     }).format(new Date(log.created_at))}
                   </Text>
                 </View>
+                <Pressable
+                  style={styles.logDismissButton}
+                  onPress={() => void handleDismissLog(log.id)}
+                  disabled={dismissingLogId === log.id}
+                >
+                  <Text style={styles.logDismissButtonText}>
+                    {dismissingLogId === log.id ? "..." : "閉じる"}
+                  </Text>
+                </Pressable>
               </View>
             ))
           ) : (
@@ -770,6 +952,13 @@ export default function App() {
                 ) : null}
 
                 <View style={styles.actionGrid}>
+                  <Pressable
+                    style={[styles.actionButton, styles.actionButtonSecondary]}
+                    onPress={() => openEditModal(selectedTask)}
+                    disabled={actingTaskId === selectedTask.id}
+                  >
+                    <Text style={styles.actionButtonText}>編集</Text>
+                  </Pressable>
                   {(["start", "confirm", "complete", "pause", "postpone"] as TaskAction[]).map(
                     (action) => (
                       <Pressable
@@ -786,6 +975,13 @@ export default function App() {
                     ),
                   )}
                 </View>
+
+                <Pressable
+                  style={[styles.closeButton, styles.deleteButton]}
+                  onPress={() => handleDeleteTask(selectedTask.id)}
+                >
+                  <Text style={styles.deleteButtonText}>削除</Text>
+                </Pressable>
 
                 <Pressable style={styles.closeButton} onPress={() => setActiveTaskId(null)}>
                   <Text style={styles.closeButtonText}>閉じる</Text>
@@ -805,35 +1001,41 @@ export default function App() {
         <Pressable style={styles.modalBackdrop} onPress={() => setCreateModalVisible(false)}>
           <Pressable style={[styles.modalCard, styles.largeModalCard]} onPress={() => null}>
             <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.modalTitle}>タスクを追加</Text>
+              <Text style={styles.modalTitle}>
+                {editorMode === "edit" ? "タスクを編集" : "タスクを追加"}
+              </Text>
               <Text style={styles.modalMeta}>
-                追加先: {primaryGroup ? `${primaryGroup.name} に共有` : "個人タスク"}
+                {editorMode === "edit"
+                  ? "内容を更新します"
+                  : `追加先: ${primaryGroup ? `${primaryGroup.name} に共有` : "個人タスク"}`}
               </Text>
 
-              <View style={styles.formSection}>
-                <Text style={styles.fieldLabel}>既存タスクをコピー</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  {copyableTasks.map((task) => (
-                    <Pressable
-                      key={task.id}
-                      style={[
-                        styles.copyTaskChip,
-                        draftTask.copiedFromTaskId === task.id && styles.copyTaskChipActive,
-                      ]}
-                      onPress={() => applyCopiedTask(task.id)}
-                    >
-                      <Text
+              {editorMode === "create" ? (
+                <View style={styles.formSection}>
+                  <Text style={styles.fieldLabel}>既存タスクをコピー</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    {copyableTasks.map((task) => (
+                      <Pressable
+                        key={task.id}
                         style={[
-                          styles.copyTaskChipText,
-                          draftTask.copiedFromTaskId === task.id && styles.copyTaskChipTextActive,
+                          styles.copyTaskChip,
+                          draftTask.copiedFromTaskId === task.id && styles.copyTaskChipActive,
                         ]}
+                        onPress={() => applyCopiedTask(task.id)}
                       >
-                        {task.title}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              </View>
+                        <Text
+                          style={[
+                            styles.copyTaskChipText,
+                            draftTask.copiedFromTaskId === task.id && styles.copyTaskChipTextActive,
+                          ]}
+                        >
+                          {task.title}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              ) : null}
 
               <View style={styles.formSection}>
                 <Text style={styles.fieldLabel}>タイトル</Text>
@@ -1063,7 +1265,9 @@ export default function App() {
                   {savingTask ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.primaryButtonText}>登録</Text>
+                    <Text style={styles.primaryButtonText}>
+                      {editorMode === "edit" ? "更新" : "登録"}
+                    </Text>
                   )}
                 </Pressable>
               </View>
@@ -1184,6 +1388,33 @@ const styles = StyleSheet.create({
     color: MUTED,
     fontSize: 15,
   },
+  daySwitcherRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+  },
+  dateSwitchButton: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 16,
+    backgroundColor: "#F3EEE4",
+    borderWidth: 1,
+    borderColor: BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dateSwitchButtonActive: {
+    backgroundColor: BRAND,
+    borderColor: BRAND,
+  },
+  dateSwitchText: {
+    color: TEXT,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  dateSwitchTextActive: {
+    color: "#FFFFFF",
+  },
   fabButton: {
     width: 52,
     height: 52,
@@ -1295,6 +1526,7 @@ const styles = StyleSheet.create({
   },
   taskBadgeWrap: {
     alignItems: "flex-end",
+    gap: 6,
   },
   statusChip: {
     paddingHorizontal: 10,
@@ -1305,6 +1537,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     overflow: "hidden",
+  },
+  priorityText: {
+    color: MUTED,
+    fontSize: 12,
+    fontWeight: "700",
   },
   taskDescription: {
     color: MUTED,
@@ -1340,11 +1577,6 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
-  logActor: {
-    color: TEXT,
-    fontSize: 13,
-    fontWeight: "700",
-  },
   logText: {
     color: TEXT,
     fontSize: 14,
@@ -1354,6 +1586,20 @@ const styles = StyleSheet.create({
     color: MUTED,
     fontSize: 12,
     marginTop: 6,
+  },
+  logDismissButton: {
+    minWidth: 56,
+    minHeight: 36,
+    borderRadius: 14,
+    backgroundColor: "#E7ECE4",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+  },
+  logDismissButtonText: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: "700",
   },
   versionFooter: {
     alignItems: "center",
@@ -1561,6 +1807,9 @@ const styles = StyleSheet.create({
   actionButtonDisabled: {
     opacity: 0.6,
   },
+  actionButtonSecondary: {
+    backgroundColor: "#8A7B65",
+  },
   actionButtonText: {
     color: "#FFFFFF",
     fontSize: 14,
@@ -1575,6 +1824,14 @@ const styles = StyleSheet.create({
   },
   closeButtonText: {
     color: TEXT,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  deleteButton: {
+    backgroundColor: "#FFF0EE",
+  },
+  deleteButtonText: {
+    color: "#B13E31",
     fontSize: 14,
     fontWeight: "700",
   },
